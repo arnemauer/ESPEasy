@@ -39,7 +39,7 @@ boolean CPlugin_003(byte function, struct EventStruct *event, String& string)
         char host[20];
         sprintf_P(host, PSTR("%u.%u.%u.%u"), ControllerSettings.IP[0], ControllerSettings.IP[1], ControllerSettings.IP[2], ControllerSettings.IP[3]);
 
-        sprintf_P(log, PSTR("%s%s using port %u"), PSTR("TELNT: connecting to "), host,ControllerSettings.Port);
+        sprintf_P(log, PSTR("%s%s using port %u"), "TELNT: connecting to ", host,ControllerSettings.Port);
         addLog(LOG_LEVEL_DEBUG, log);
 
         // Use WiFiClient class to create TCP connections
@@ -73,8 +73,12 @@ boolean CPlugin_003(byte function, struct EventStruct *event, String& string)
         timer = millis() + 1000;
         while (client.available() && millis() < timer && !success)
         {
-          String line = client.readStringUntil('\n');
-          if (line.substring(0, 20) == PSTR("Enter your password:"))
+
+          //   String line = client.readStringUntil('\n');
+          String line;
+          safeReadStringUntil(client, line, '\n');
+
+          if (line.startsWith(F("Enter your password:")))
           {
             success = true;
             strcpy_P(log, PSTR("TELNT: Password request ok"));

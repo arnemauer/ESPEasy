@@ -39,7 +39,7 @@ boolean CPlugin_004(byte function, struct EventStruct *event, String& string)
         char host[20];
         sprintf_P(host, PSTR("%u.%u.%u.%u"), ControllerSettings.IP[0], ControllerSettings.IP[1], ControllerSettings.IP[2], ControllerSettings.IP[3]);
 
-        sprintf_P(log, PSTR("%s%s using port %u"), PSTR("HTTP : connecting to "), host,ControllerSettings.Port);
+        sprintf_P(log, PSTR("%s%s using port %u"), "HTTP : connecting to ", host,ControllerSettings.Port);
         addLog(LOG_LEVEL_DEBUG, log);
 
         // Use WiFiClient class to create TCP connections
@@ -91,7 +91,10 @@ boolean CPlugin_004(byte function, struct EventStruct *event, String& string)
 
         // Read all the lines of the reply from server and print them to Serial
         while (client.available()) {
-          String line = client.readStringUntil('\n');
+          //   String line = client.readStringUntil('\n');
+          String line;
+          safeReadStringUntil(client, line, '\n');
+          
           line.toCharArray(log, 80);
           addLog(LOG_LEVEL_DEBUG_MORE, log);
           if (line.substring(0, 15) == F("HTTP/1.1 200 OK"))

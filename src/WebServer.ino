@@ -1,6 +1,50 @@
 //********************************************************************************
 // Web Interface init
 //********************************************************************************
+
+#define HTML_SYMBOL_WARNING "&#9888;"
+
+static const char pgDefaultCSS[] PROGMEM = {
+  //color sheme: #07D #D50 #DB0 #A0D
+  "* {font-family:sans-serif; font-size:12pt;}"
+  "h1 {font-size:16pt; color:#07D; margin:8px 0; font-weight:bold;}"
+  "h2 {font-size:12pt; margin:0 -4px; padding:6px; background-color:#444; color:#FFF; font-weight:bold;}"
+  "h3 {font-size:12pt; margin:16px -4px 0 -4px; padding:4px; background-color:#EEE; color:#444; font-weight:bold;}"
+  "h6 {font-size:10pt; color:#07D;}"
+  //buttons
+  ".button {margin:4px; padding:4px 16px; background-color:#07D; color:#FFF; text-decoration:none; border-radius:4px}"
+  ".button.link {}"
+  ".button.help {padding:2px 4px; border:solid 1px #FFF; border-radius:50%}"
+  ".button:hover {background:#369;}"
+  //tables
+  "th {padding:6px; background-color:#444; color:#FFF; border-color:#888; font-weight:bold;}"
+  "td {padding:4px;}"
+  "tr {padding:4px;}"
+  "table {color:#000;}"
+  //inside a form
+  ".note {color:#444; font-style:italic}"
+  //header with title and menu
+  ".headermenu {position:fixed; top:0; left:0; right:0; height:64px; padding:8px 12px; background-color:#F8F8F8; border-bottom: 1px solid #DDD;}"
+  ".bodymenu {margin-top:96px;}"
+  //menu
+  ".menubar {position:inherit; top:44px;}"
+  ".menu {float:left; height:20px; padding: 4px 16px 8px 16px; color:#444; white-space:nowrap; border:solid transparent; border-width: 4px 1px 1px; border-radius: 4px 4px 0 0; text-decoration: none;}"
+  ".menu.active {color:#000; background-color:#FFF; border-color:#07D #DDD #FFF;}"
+  ".menu:hover {color:#000; background:#DEF;}"
+  //symbols for enabled
+  ".on {color:green;}"
+  ".off {color:red;}"
+  //others
+  ".div_l {float:left;}"
+  ".div_r {float:right; margin:2px; padding:1px 10px; border-radius:4px; background-color:#080; color:white;}"
+  ".div_br {clear:both;}"
+  //".active {text-decoration:underline;}"
+  "\0"
+};
+
+#define PGMT( pgm_ptr ) ( reinterpret_cast< const __FlashStringHelper * >( pgm_ptr ) )
+
+
 void WebServerInit()
 {
   // Prepare webserver pages
@@ -27,6 +71,7 @@ void WebServerInit()
   WebServer.on("/json", handle_json);
   WebServer.on("/rules", handle_rules);
   WebServer.on("/sysinfo", handle_sysinfo);
+  WebServer.on("/pinstates", handle_pinstates);
 
   if (ESP.getFlashChipRealSize() > 524288)
     httpUpdater.setup(&WebServer);
@@ -42,75 +87,324 @@ void WebServerInit()
   WebServer.begin();
 }
 
+void sendWebPage(const String& tmplName, String& pageContent)
+{
+  String pageTemplate;
+
+  String fileName = tmplName;
+  fileName += F(".htm");
+
+  fs::File f = SPIFFS.open(fileName, "r+");
+  if (f)
+  {
+    while (f.available())
+      pageTemplate += (char)f.read();
+    f.close();
+  }
+  else
+  {
+    getWebPageTemplateDefault(tmplName, pageTemplate);
+  }
+  checkRAM(F("sendWebPage"));
+  processAndSendWebPageTemplate(pageTemplate, pageContent);
+
+  pageTemplate = F("");
+  pageContent = F("");
+}
+
+
+void getWebPageTemplateDefault(const String& tmplName, String& tmpl)
+{
+  if (tmplName == F("TmplAP"))
+  {
+    tmpl += F(
+              "<!DOCTYPE html>"
+              "<head>"
+              "<title>{{name}}</title>"
+              "{{css}}"
+              "</head>"
+              "<body>"
+              "<h1>Welcome to ESP Easy Mega AP</h1>"
+              "{{error}}"
+              "{{content}}"
+              "<BR><h6>Powered by www.letscontrolit.com</h6>"
+              "</body>"
+            );
+  }
+  else if (tmplName == F("TmplMsg"))
+  {
+    tmpl += F(
+              "<!DOCTYPE html>"
+              "<head>"
+              "<title>{{name}}</title>"
+              "{{css}}"
+              "</head>"
+              "<body>"
+              "<h1>ESP Easy Mega: {{name}}</h1>"
+              "{{error}}"
+              "{{content}}"
+              "<BR><h6>Powered by www.letscontrolit.com</h6>"
+              "</body>"
+            );
+  }
+  else   //all other template names e.g. TmplStd
+  {
+    tmpl += F(
+      "<!DOCTYPE html><html lang='en'>"
+      "<head>"
+        "<title>{{name}}</title>"
+        "{{js}}"
+        "{{css}}"
+      "</head>"
+      "<body class='bodymenu'>"
+        "<header class='headermenu'>"
+          "<h1>ESP Easy Mega: {{name}} {{logo}}</h1>"
+          "{{menu}}"
+        "</header>"
+        "{{error}}"
+        "{{content}}"
+        "<footer>"
+          "<h6>Powered by www.letscontrolit.com</h6>"
+        "</footer>"
+      "</body></html>"
+            );
+  }
+}
+
+
+void sendWebPageChunkedBegin(String& log)
+{
+  statusLED(true);
+  WebServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  // WebServer.sendHeader("Content-Type","text/html",true);
+  WebServer.sendHeader("Cache-Control","no-cache");
+  WebServer.sendHeader("Transfer-Encoding","chunked");
+  WebServer.send(200);
+}
+
+void sendWebPageChunkedData(String& log, String& data)
+{
+  checkRAM(F("sendWebPageChunkedData"));
+  if (data.length() > 0)
+  {
+    statusLED(true);
+    log += F(" [");
+    log += data.length();
+    log += F("]");
+    String size;
+    size=String(data.length(), HEX)+"\r\n";
+
+    //do chunked transfer encoding ourselfs (WebServer doesnt support it)
+    WebServer.sendContent(size);
+    WebServer.sendContent(data);
+    WebServer.sendContent("\r\n");
+
+    data = F("");   //free RAM
+  }
+}
+
+void sendWebPageChunkedEnd(String& log)
+{
+  log += F(" [0]");
+  WebServer.sendContent("0\r\n\r\n");
+}
+
+
+void processAndSendWebPageTemplate(String& pageTemplate, String& pageContent)
+{
+  int indexStart, indexEnd;
+  String pageResult, varName, varValue;
+
+  String log = F("HTML : Template-Size=");
+  log += pageTemplate.length();
+  log += F(" Content-Size=");
+  log += pageContent.length();
+
+  sendWebPageChunkedBegin(log);   //prepare chunked send
+
+  while ((indexStart = pageTemplate.indexOf("{{")) >= 0)
+  {
+    pageResult += pageTemplate.substring(0, indexStart);
+    pageTemplate = pageTemplate.substring(indexStart);
+
+    if ((indexEnd = pageTemplate.indexOf("}}")) > 0)
+    {
+      varName = pageTemplate.substring(2, indexEnd);
+      pageTemplate = pageTemplate.substring(indexEnd + 2);
+
+      varName.toLowerCase();
+
+      if (varName == F("content"))   //is var == page content?
+      {
+        sendWebPageChunkedData(log, pageResult);   //send the rest of the accumulated HTML before content
+        sendWebPageChunkedData(log, pageContent);   //send the content - free mem - content can only added once
+      }
+      else
+      {
+        getWebPageTemplateVar(varName, varValue);
+        /*TEST
+                String log = F("> VarName: ");
+                log += varName;
+                log += F(" ");
+                log += indexStart;
+                log += F("+");
+                log += indexEnd;
+                log += F(" : ");
+                log += varValue;
+                addLog(LOG_LEVEL_DEBUG, log);
+        */
+        pageResult += varValue;
+      }
+    }
+    else   //no closing "}}"
+      pageTemplate = pageTemplate.substring(2);   //eat "{{"
+
+    //send the accumulated HTML if junk is 500+ bytes
+    if (pageResult.length() > 500)
+    {
+      sendWebPageChunkedData(log, pageResult);
+    }
+  }
+  pageResult += pageTemplate;   //add the rest without vars
+  pageTemplate = F("");   //free mem
+
+  sendWebPageChunkedData(log, pageResult);   //send the rest of the accumulated HTML
+  sendWebPageChunkedEnd(log);   //close chunked send
+
+  addLog(LOG_LEVEL_DEBUG, log);
+}
+
+
+static byte navMenuIndex = 0;
+
+void getWebPageTemplateVar(const String& varName, String& varValue)
+{
+  varValue = F("");
+
+  if (varName == F("name"))
+  {
+    varValue = Settings.Name;
+  }
+
+  else if (varName == F("unit"))
+  {
+    varValue = Settings.Unit;
+  }
+
+  else if (varName == F("menu"))
+  {
+    static const __FlashStringHelper* gpMenu[8][2] = {
+      F("Main"), F("."),                      //0
+      F("Config"), F("config"),               //1
+      F("Controllers"), F("controllers"),     //2
+      F("Hardware"), F("hardware"),           //3
+      F("Devices"), F("devices"),             //4
+      F("Rules"), F("rules"),                 //5
+      F("Notifications"), F("notifications"), //6
+      F("Tools"), F("tools"),                 //7
+    };
+
+    varValue += F("<div class='menubar'>");
+
+    for (byte i = 0; i < 8; i++)
+    {
+      if (i == 5 && !Settings.UseRules)   //hide rules menu item
+        continue;
+
+      varValue += F("<a class='menu");
+      if (i == navMenuIndex)
+        varValue += F(" active");
+      varValue += F("' href='");
+      varValue += gpMenu[i][1];
+      varValue += F("'>");
+      varValue += gpMenu[i][0];
+      varValue += F("</a>");
+    }
+
+    varValue += F("</div>");
+  }
+
+  else if (varName == F("logo"))
+  {
+    if (SPIFFS.exists("esp.png"))
+    {
+      varValue = F("<img src=\"esp.png\" width=48 height=48 align=right>");
+    }
+  }
+
+  else if (varName == F("css"))
+  {
+    if (SPIFFS.exists("esp.css"))   //now css is written in writeDefaultCSS() to SPIFFS and always present
+    //if (0) //TODO
+    {
+      varValue = F("<link rel=\"stylesheet\" type=\"text/css\" href=\"esp.css\">");
+    }
+    else
+    {
+      varValue += F("<style>");
+      varValue += PGMT(pgDefaultCSS);
+      varValue += F("</style>");
+    }
+  }
+
+  else if (varName == F("js"))
+  {
+    varValue += F(
+                  "<script><!--\n"
+                  "function dept_onchange(frmselect) {frmselect.submit();}"
+                  "\n//--></script>");
+  }
+
+  else if (varName == F("error"))
+  {
+    //print last error - not implemented yet
+  }
+
+  else if (varName == F("debug"))
+  {
+    //print debug messages - not implemented yet
+  }
+
+  else
+  {
+    String log = F("Templ: Unknown Var : ");
+    log += varName;
+    addLog(LOG_LEVEL_ERROR, log);
+    //no return string - eat var name
+  }
+}
+
+
+void writeDefaultCSS(void)
+{
+  return; //TODO
+
+  if (!SPIFFS.exists("esp.css"))
+  {
+    String defaultCSS = PGMT(pgDefaultCSS);
+
+    fs::File f = SPIFFS.open("esp.css", "w");
+    if (f)
+    {
+      String log = F("CSS  : Writing default CSS file to SPIFFS (");
+      log += defaultCSS.length();
+      log += F(" bytes)");
+      addLog(LOG_LEVEL_INFO, log);
+
+      f.write((const unsigned char*)defaultCSS.c_str(), defaultCSS.length());   //note: content must be in RAM - a write of F("XXX") does not work
+      f.close();
+    }
+
+  }
+}
+
 
 //********************************************************************************
 // Add top menu
 //********************************************************************************
 void addHeader(boolean showMenu, String& str)
 {
-  boolean cssfile = false;
-
-  str += F("<script language=\"javascript\"><!--\n");
-  str += F("function dept_onchange(frmselect) {frmselect.submit();}\n");
-  str += F("//--></script>");
-  str += F("<head><title>");
-  str += Settings.Name;
-  str += F("</title>");
-
-  fs::File f = SPIFFS.open("esp.css", "r");
-  if (f)
-  {
-    cssfile = true;
-    f.close();
-  }
-
-  if (!cssfile)
-  {
-    str += F("<style>");
-    str += F("* {font-family:sans-serif; font-size:12pt;}");
-    str += F("h1 {font-size:16pt; color:black;}");
-    str += F("h6 {font-size:10pt; color:black; text-align:center;}");
-    str += F(".button-menu {background-color:#ffffff; color:blue; margin: 10px; text-decoration:none}");
-    str += F(".button-link {padding:5px 15px; background-color:#0077dd; color:#fff; border:solid 1px #fff; text-decoration:none}");
-    str += F(".button-menu:hover {background:#ddddff;}");
-    str += F(".button-link:hover {background:#369;}");
-    str += F("th {padding:10px; background-color:black; color:#ffffff;}");
-    str += F("td {padding:7px;}");
-    str += F("table {color:black;}");
-    str += F(".div_l {float: left;}");
-    str += F(".div_r {float: right; margin: 2px; padding: 1px 10px; border-radius: 7px; background-color:#080; color:white;}");
-    str += F(".div_br {clear: both;}");
-    str += F("</style>");
-  }
-  else
-    str += F("<link rel=\"stylesheet\" type=\"text/css\" href=\"esp.css\">");
-
-  str += F("</head>");
-
-  str += F("<h1>Welcome to ESP Easy Mega: ");
-  str += Settings.Name;
-
-  f = SPIFFS.open("esp.png", "r");
-  if (f)
-  {
-    str += F("<img src=\"esp.png\" width=50 height=50 align=right >");
-    f.close();
-  }
-
-  str += F("</h1>");
-
-  if (showMenu)
-  {
-    str += F("<BR><a class=\"button-menu\" href=\".\">Main</a>");
-    str += F("<a class=\"button-menu\" href=\"config\">Config</a>");
-    str += F("<a class=\"button-menu\" href=\"controllers\">Controllers</a>");
-    str += F("<a class=\"button-menu\" href=\"hardware\">Hardware</a>");
-    str += F("<a class=\"button-menu\" href=\"devices\">Devices</a>");
-    if (Settings.UseRules)
-      str += F("<a class=\"button-menu\" href=\"rules\">Rules</a>");
-    str += F("<a class=\"button-menu\" href=\"notifications\">Notifications</a>");
-    str += F("<a class=\"button-menu\" href=\"tools\">Tools</a><BR><BR>");
-  }
+  //not longer used - now part of template
 }
 
 
@@ -119,7 +413,7 @@ void addHeader(boolean showMenu, String& str)
 //********************************************************************************
 void addFooter(String& str)
 {
-  str += F("<h6>Powered by www.letscontrolit.com</h6></body>");
+  //not longer used - now part of template
 }
 
 
@@ -142,7 +436,11 @@ void handle_root() {
 
   if ((strcasecmp_P(sCommand.c_str(), PSTR("wifidisconnect")) != 0) && (strcasecmp_P(sCommand.c_str(), PSTR("reboot")) != 0))
   {
+    if (timerAPoff)
+      timerAPoff = millis() + 2000L;  //user has reached the main page - AP can be switched off in 2..3 sec
+
     String reply = "";
+    navMenuIndex = 0;
     addHeader(true, reply);
 
     printToWeb = true;
@@ -155,7 +453,7 @@ void handle_root() {
 
     reply += printWebString;
     reply += F("<form>");
-    reply += F("<table><TH>System Info<TH>Value<TH><TH>System Info<TH>Value<TH>");
+    reply += F("<table><TR><TH>System Info<TH>Value<TH><TH>System Info<TH>Value<TH>");
 
     reply += F("<TR><TD>Unit:<TD>");
     reply += Settings.Unit;
@@ -166,21 +464,7 @@ void handle_root() {
     reply += F("<TR><TD>Local Time:<TD>");
     if (Settings.UseNTP)
     {
-      reply += year();
-      reply += F("-");
-      if (month() < 10)
-        reply += "0";
-      reply += month();
-      reply += F("-");
-      if (day() < 10)
-      	reply += F("0");
-      reply += day();
-      reply += F(" ");
-      reply += hour();
-      reply += F(":");
-      if (minute() < 10)
-        reply += F("0");
-      reply += minute();
+      reply += getDateTimeString('-', ':', ' ');
     }
     else
       reply += F("NTP disabled");
@@ -208,6 +492,8 @@ void handle_root() {
     reply += freeMem;
     reply += F(" (");
     reply += lowestRAM;
+    reply += F(" - ");
+    reply += lowestRAMfunction;
     reply += F(")");
 
     char str[20];
@@ -222,13 +508,22 @@ void handle_root() {
       reply += F(" dB");
     }
 
+    #ifdef FEATURE_MDNS
+      reply += F("<TR><TD>mDNS:<TD><a href='http://");
+      reply += WifiGetHostname();
+      reply += F(".local'>");
+      reply += WifiGetHostname();
+      reply += F(".local</a><TD><TD><TD>");
+    #endif
+
+
     reply += F("<TR><TH>Node List:<TH>Name<TH>Build<TH>Type<TH>IP<TH>Age<TR><TD><TD>");
     for (byte x = 0; x < UNIT_MAX; x++)
     {
       if (Nodes[x].ip[0] != 0)
       {
         char url[80];
-        sprintf_P(url, PSTR("<a href='http://%u.%u.%u.%u'>%u.%u.%u.%u</a>"), Nodes[x].ip[0], Nodes[x].ip[1], Nodes[x].ip[2], Nodes[x].ip[3], Nodes[x].ip[0], Nodes[x].ip[1], Nodes[x].ip[2], Nodes[x].ip[3]);
+        sprintf_P(url, PSTR("<a class='button link' href='http://%u.%u.%u.%u'>%u.%u.%u.%u</a>"), Nodes[x].ip[0], Nodes[x].ip[1], Nodes[x].ip[2], Nodes[x].ip[3], Nodes[x].ip[0], Nodes[x].ip[1], Nodes[x].ip[2], Nodes[x].ip[3]);
         reply += F("<TR><TD>Unit ");
         reply += x;
         reply += F("<TD>");
@@ -268,12 +563,14 @@ void handle_root() {
 
     reply += F("</table></form>");
     addFooter(reply);
-    WebServer.send(200, "text/html", reply);
+    sendWebPage(F("TmplStd"), reply);
     printWebString = "";
     printToWeb = false;
   }
   else
   {
+    //TODO: move this to handle_tools, from where it is actually called?
+
     // have to disconnect or reboot from within the main loop
     // because the webconnection is still active at this point
     // disconnect here could result into a crash/reboot...
@@ -302,22 +599,27 @@ void handle_root() {
 void handle_config() {
   if (!isLoggedIn()) return;
 
+  if (timerAPoff)
+    timerAPoff = millis() + 2000L;  //user has reached the main page - AP can be switched off in 2..3 sec
+
   char tmpString[64];
 
+  navMenuIndex = 1;
   String name = WebServer.arg(F("name"));
-  String password = WebServer.arg(F("password"));
+  //String password = WebServer.arg(F("password"));
   String ssid = WebServer.arg(F("ssid"));
-  String key = WebServer.arg(F("key"));
+  //String key = WebServer.arg(F("key"));
   String ssid2 = WebServer.arg(F("ssid2"));
-  String key2 = WebServer.arg(F("key2"));
+  //String key2 = WebServer.arg(F("key2"));
   String sensordelay = WebServer.arg(F("delay"));
   String deepsleep = WebServer.arg(F("deepsleep"));
+  String deepsleeponfail = WebServer.arg(F("deepsleeponfail"));
   String espip = WebServer.arg(F("espip"));
   String espgateway = WebServer.arg(F("espgateway"));
   String espsubnet = WebServer.arg(F("espsubnet"));
   String espdns = WebServer.arg(F("espdns"));
   String unit = WebServer.arg(F("unit"));
-  String apkey = WebServer.arg(F("apkey"));
+  //String apkey = WebServer.arg(F("apkey"));
 
   String reply = "";
   addHeader(true, reply);
@@ -325,15 +627,20 @@ void handle_config() {
   if (ssid[0] != 0)
   {
     strncpy(Settings.Name, name.c_str(), sizeof(Settings.Name));
-    strncpy(SecuritySettings.Password, password.c_str(), sizeof(SecuritySettings.Password));
+    //strncpy(SecuritySettings.Password, password.c_str(), sizeof(SecuritySettings.Password));
+    copyFormPassword(F("password"), SecuritySettings.Password, sizeof(SecuritySettings.Password));
     strncpy(SecuritySettings.WifiSSID, ssid.c_str(), sizeof(SecuritySettings.WifiSSID));
-    strncpy(SecuritySettings.WifiKey, key.c_str(), sizeof(SecuritySettings.WifiKey));
+    //strncpy(SecuritySettings.WifiKey, key.c_str(), sizeof(SecuritySettings.WifiKey));
+    copyFormPassword(F("key"), SecuritySettings.WifiKey, sizeof(SecuritySettings.WifiKey));
     strncpy(SecuritySettings.WifiSSID2, ssid2.c_str(), sizeof(SecuritySettings.WifiSSID2));
-    strncpy(SecuritySettings.WifiKey2, key2.c_str(), sizeof(SecuritySettings.WifiKey2));
-    strncpy(SecuritySettings.WifiAPKey, apkey.c_str(), sizeof(SecuritySettings.WifiAPKey));
+    //strncpy(SecuritySettings.WifiKey2, key2.c_str(), sizeof(SecuritySettings.WifiKey2));
+    copyFormPassword(F("key2"), SecuritySettings.WifiKey2, sizeof(SecuritySettings.WifiKey2));
+    //strncpy(SecuritySettings.WifiAPKey, apkey.c_str(), sizeof(SecuritySettings.WifiAPKey));
+    copyFormPassword(F("apkey"), SecuritySettings.WifiAPKey, sizeof(SecuritySettings.WifiAPKey));
 
     Settings.Delay = sensordelay.toInt();
     Settings.deepSleep = (deepsleep == "on");
+    Settings.deepSleepOnFail = (deepsleeponfail == "on");
     espip.toCharArray(tmpString, 26);
     str2ip(tmpString, Settings.IP);
     espgateway.toCharArray(tmpString, 26);
@@ -348,63 +655,51 @@ void handle_config() {
   }
 
   reply += F("<form name='frmselect' method='post'><table>");
-  reply += F("<TH>Main Settings<TH><TR><TD>Name:<TD><input type='text'  maxlength='25' name='name' value='");
+
+  addFormHeader(reply, F("Main Settings"));
+
   Settings.Name[25] = 0;
-  reply += Settings.Name;
-  reply += F("'><TR><TD>Admin Password:<TD><input type='password' maxlength='25'  name='password' value='");
   SecuritySettings.Password[25] = 0;
-  reply += SecuritySettings.Password;
-  reply += F("'><TR><TD>SSID:<TD><input type='text' name='ssid' value='");
-  reply += SecuritySettings.WifiSSID;
-  reply += F("'><TR><TD>WPA Key:<TD><input type='password' maxlength='63' name='key' value='");
-  reply += SecuritySettings.WifiKey;
-  reply += F("'><TR><TD>Fallback SSID:<TD><input type='text' name='ssid2' value='");
-  reply += SecuritySettings.WifiSSID2;
-  reply += F("'><TR><TD>Fallback WPA Key:<TD><input type='password' maxlength='63' name='key2' value='");
-  reply += SecuritySettings.WifiKey2;
+  addFormTextBox(reply, F("Unit Name"), F("name"), Settings.Name, 25);
+  addFormNumericBox(reply, F("Unit Number"), F("unit"), Settings.Unit, 0, 9999);
+  addFormPasswordBox(reply, F("Admin Password"), F("password"), SecuritySettings.Password, 25);
 
-  reply += F("'><TR><TD>WPA AP Mode Key:<TD><input type='password' maxlength='63' name='apkey' value='");
-  reply += SecuritySettings.WifiAPKey;
+  addFormSubHeader(reply, F("Wifi Settings"));
 
-  reply += F("'><TR><TD>Unit nr:<TD><input type='text' name='unit' value='");
-  reply += Settings.Unit;
+  addFormTextBox(reply, F("SSID"), F("ssid"), SecuritySettings.WifiSSID, 31);
+  addFormPasswordBox(reply, F("WPA Key"), F("key"), SecuritySettings.WifiKey, 63);
+  addFormTextBox(reply, F("Fallback SSID"), F("ssid2"), SecuritySettings.WifiSSID2, 31);
+  addFormPasswordBox(reply, F("Fallback WPA Key"), F("key2"), SecuritySettings.WifiKey2, 63);
+  addFormSeparator(reply);
+  addFormPasswordBox(reply, F("WPA AP Mode Key"), F("apkey"), SecuritySettings.WifiAPKey, 63);
 
-  reply += F("'>");
 
-  char str[20];
+  addFormSubHeader(reply, F("IP Settings"));
 
-  reply += F("<TR><TD>Sleep Delay:<TD><input type='text' name='delay' value='");
-  reply += Settings.Delay;
-  reply += F("'><TR><TD>Sleep enabled:<TD>");
-  if (Settings.deepSleep)
-    reply += F("<input type=checkbox name='deepsleep' checked>");
-  else
-    reply += F("<input type=checkbox name='deepsleep'>");
+  addFormIPBox(reply, F("ESP IP"), F("espip"), Settings.IP);
+  addFormIPBox(reply, F("ESP GW"), F("espgateway"), Settings.Gateway);
+  addFormIPBox(reply, F("ESP Subnet"), F("espsubnet"), Settings.Subnet);
+  addFormIPBox(reply, F("ESP DNS"), F("espdns"), Settings.DNS);
+  addFormNote(reply, F("Leave empty for DHCP"));
 
-  reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/SleepMode\" target=\"_blank\">?</a>");
 
-  reply += F("<TR><TH>Optional Settings<TH>");
+  addFormSubHeader(reply, F("Sleep Mode"));
 
-  reply += F("<TR><TD>ESP IP:<TD><input type='text' name='espip' value='");
-  sprintf_P(str, PSTR("%u.%u.%u.%u"), Settings.IP[0], Settings.IP[1], Settings.IP[2], Settings.IP[3]);
-  reply += str;
+  addFormCheckBox(reply, F("Sleep enabled"), F("deepsleep"), Settings.deepSleep);
 
-  reply += F("'><TR><TD>ESP GW:<TD><input type='text' name='espgateway' value='");
-  sprintf_P(str, PSTR("%u.%u.%u.%u"), Settings.Gateway[0], Settings.Gateway[1], Settings.Gateway[2], Settings.Gateway[3]);
-  reply += str;
+  addHelpButton(reply, F("SleepMode"));
+  addFormNumericBox(reply, F("Sleep Delay"), F("delay"), Settings.Delay, 0, 4294);   //limited by hardware to ~1.2h
+  addUnit(reply, F("sec"));
 
-  reply += F("'><TR><TD>ESP Subnet:<TD><input type='text' name='espsubnet' value='");
-  sprintf_P(str, PSTR("%u.%u.%u.%u"), Settings.Subnet[0], Settings.Subnet[1], Settings.Subnet[2], Settings.Subnet[3]);
-  reply += str;
+  addFormCheckBox(reply, F("Sleep on connection failure"), F("deepsleeponfail"), Settings.deepSleepOnFail);
 
-  reply += F("'><TR><TD>ESP DNS:<TD><input type='text' name='espdns' value='");
-  sprintf_P(str, PSTR("%u.%u.%u.%u"), Settings.DNS[0], Settings.DNS[1], Settings.DNS[2], Settings.DNS[3]);
-  reply += str;
+  addFormSeparator(reply);
 
-  reply += F("'><TR><TD><TD><input class=\"button-link\" type='submit' value='Submit'>");
+  reply += F("<TR><TD><TD>");
+  addSubmitButton(reply);
   reply += F("</table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -417,6 +712,7 @@ void handle_controllers() {
   struct EventStruct TempEvent;
   char tmpString[64];
 
+  navMenuIndex = 2;
   String controllerindex = WebServer.arg(F("index"));
   String usedns = WebServer.arg(F("usedns"));
   String controllerip = WebServer.arg(F("controllerip"));
@@ -454,7 +750,9 @@ void handle_controllers() {
       if (Settings.Protocol != 0)
       {
         byte ProtocolIndex = getProtocolIndex(Settings.Protocol[index - 1]);
-        CPlugin_ptr[ProtocolIndex](CPLUGIN_WEBFORM_SAVE, 0, dummyString);
+        TempEvent.ControllerIndex = index - 1;
+        TempEvent.ProtocolIndex = ProtocolIndex;
+        CPlugin_ptr[ProtocolIndex](CPLUGIN_WEBFORM_SAVE, &TempEvent, dummyString);
         ControllerSettings.UseDNS = usedns.toInt();
         if (ControllerSettings.UseDNS)
         {
@@ -476,7 +774,8 @@ void handle_controllers() {
         Settings.ControllerEnabled[index - 1] = (controllerenabled == "on");
         ControllerSettings.Port = controllerport.toInt();
         strncpy(SecuritySettings.ControllerUser[index - 1], controlleruser.c_str(), sizeof(SecuritySettings.ControllerUser[0]));
-        strncpy(SecuritySettings.ControllerPassword[index - 1], controllerpassword.c_str(), sizeof(SecuritySettings.ControllerPassword[0]));
+        //strncpy(SecuritySettings.ControllerPassword[index - 1], controllerpassword.c_str(), sizeof(SecuritySettings.ControllerPassword[0]));
+        copyFormPassword(F("controllerpassword"), SecuritySettings.ControllerPassword[index - 1], sizeof(SecuritySettings.ControllerPassword[0]));
         strncpy(ControllerSettings.Subscribe, controllersubscribe.c_str(), sizeof(ControllerSettings.Subscribe));
         strncpy(ControllerSettings.Publish, controllerpublish.c_str(), sizeof(ControllerSettings.Publish));
       }
@@ -486,11 +785,11 @@ void handle_controllers() {
       reply += F("<span style=\"color:red\">Error saving to flash!</span>");
   }
 
-  reply += F("<form name='frmselect' method='post'><table>");
+  reply += F("<form name='frmselect' method='post'>");
 
   if (index == 0)
   {
-    reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH>");
+    reply += F("<table border=1px frame='box' rules='all'><TR><TH>");
     reply += F("<TH>Nr<TH>Enabled<TH>Protocol<TH>IP<TH>Port");
 
     ControllerSettingsStruct ControllerSettings;
@@ -498,18 +797,15 @@ void handle_controllers() {
     {
       LoadControllerSettings(x, (byte*)&ControllerSettings, sizeof(ControllerSettings));
       reply += F("<TR><TD>");
-      reply += F("<a class=\"button-link\" href=\"controllers?index=");
+      reply += F("<a class='button link' href=\"controllers?index=");
       reply += x + 1;
       reply += F("\">Edit</a>");
       reply += F("<TD>");
-      reply += x + 1;
+      reply += getControllerSymbol(x);
       reply += F("<TD>");
       if (Settings.Protocol[x] != 0)
       {
-        if (Settings.ControllerEnabled[x])
-          reply += F("<span style=\"color:green\">Yes</span>");
-        else
-          reply += F("<span style=\"color:red\">No</span>");
+        addEnabled(reply, Settings.ControllerEnabled[x]);
 
         reply += F("<TD>");
         byte ProtocolIndex = getProtocolIndex(Settings.Protocol[x]);
@@ -527,32 +823,31 @@ void handle_controllers() {
       else
         reply += F("<TD><TD><TD>");
     }
-    reply += F("</table>");
+    reply += F("</table></form>");
   }
   else
   {
-    reply += F("<TH>Controller Settings<TH>");
+    reply += F("<table><TR><TH>Controller Settings<TH>");
     reply += F("<TR><TD>Protocol:");
     byte choice = Settings.Protocol[index - 1];
-    reply += F("<TD><select name='protocol' LANGUAGE=javascript onchange=\"return dept_onchange(frmselect)\" >");
-    reply += F("<option value='0'>- Standalone -</option>");
+    reply += F("<TD>");
+    addSelector_Head(reply, F("protocol"), true);
+    addSelector_Item(reply, F("- Standalone -"), 0, false, false, F(""));
     for (byte x = 0; x <= protocolCount; x++)
     {
-      if ((index == 1) || !Protocol[x].usesMQTT) {  // Only show MQTT capable controllers for slot "0"
-        reply += F("<option value='");
-        reply += Protocol[x].Number;
-        reply += "'";
-        if (choice == Protocol[x].Number)
-          reply += F(" selected");
-        reply += ">";
-        String ProtocolName = "";
-        CPlugin_ptr[x](CPLUGIN_GET_DEVICENAME, 0, ProtocolName);
-        reply += ProtocolName;
-        reply += F("</option>");
-      }
+      String ProtocolName = "";
+      CPlugin_ptr[x](CPLUGIN_GET_DEVICENAME, 0, ProtocolName);
+
+      addSelector_Item(reply,
+                       ProtocolName,
+                       Protocol[x].Number,
+                       choice == Protocol[x].Number,
+                       !((index == 1) || !Protocol[x].usesMQTT),
+                       F(""));
     }
-    reply += F("</select>");
-    reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/EasyProtocols\" target=\"_blank\">?</a>");
+    addSelector_Foot(reply);
+
+    addHelpButton(reply, F("EasyProtocols"));
 
 
     char str[20];
@@ -565,84 +860,57 @@ void handle_controllers() {
       String options[2];
       options[0] = F("Use IP address");
       options[1] = F("Use Hostname");
-      int optionValues[2];
-      optionValues[0] = 0;
-      optionValues[1] = 1;
-      reply += F("<TR><TD>Locate Controller:<TD><select name='usedns' LANGUAGE=javascript onchange=\"return dept_onchange(frmselect)\" >");
-      for (byte x = 0; x < 2; x++)
-      {
-        reply += F("<option value='");
-        reply += optionValues[x];
-        reply += "'";
-        if (choice == optionValues[x])
-          reply += F(" selected");
-        reply += ">";
-        reply += options[x];
-        reply += F("</option>");
-      }
-      reply += F("</select>");
+
+      addFormSelector(reply, F("Locate Controller"), F("usedns"), 2, options, NULL, NULL, choice, true);
 
       if (ControllerSettings.UseDNS)
       {
-        reply += F("<TR><TD>Controller Hostname:<TD><input type='text' name='controllerhostname' size='64' value='");
-        reply += ControllerSettings.HostName;
+        addFormTextBox(reply, F("Controller Hostname"), F("controllerhostname"), ControllerSettings.HostName, sizeof(ControllerSettings.HostName)-1);
       }
       else
       {
-        reply += F("<TR><TD>Controller IP:<TD><input type='text' name='controllerip' value='");
-        sprintf_P(str, PSTR("%u.%u.%u.%u"), ControllerSettings.IP[0], ControllerSettings.IP[1], ControllerSettings.IP[2], ControllerSettings.IP[3]);
-        reply += str;
+        addFormIPBox(reply, F("Controller IP"), F("controllerip"), ControllerSettings.IP);
       }
 
-      reply += F("'><TR><TD>Controller Port:<TD><input type='text' name='controllerport' value='");
-      reply += ControllerSettings.Port;
-      reply += F("'>");
+      addFormNumericBox(reply, F("Controller Port"), F("controllerport"), ControllerSettings.Port, 1, 65535);
 
       byte ProtocolIndex = getProtocolIndex(Settings.Protocol[index - 1]);
       if (Protocol[ProtocolIndex].usesAccount)
       {
-        reply += F("<TR><TD>Controller User:<TD><input type='text' name='controlleruser' value='");
-        reply += SecuritySettings.ControllerUser[index - 1];
-        reply += F("'>");
+        addFormTextBox(reply, F("Controller User"), F("controlleruser"), SecuritySettings.ControllerUser[index - 1], sizeof(SecuritySettings.ControllerUser[0])-1);
       }
 
       if (Protocol[ProtocolIndex].usesPassword)
       {
-        reply += F("<TR><TD>Controller Password:<TD><input type='password' name='controllerpassword' value='");
-        reply += SecuritySettings.ControllerPassword[index - 1];
-        reply += F("'>");
+        addFormPasswordBox(reply, F("Controller Password"), F("controllerpassword"), SecuritySettings.ControllerPassword[index - 1], sizeof(SecuritySettings.ControllerPassword[0])-1);
       }
 
       if (Protocol[ProtocolIndex].usesTemplate || Protocol[ProtocolIndex].usesMQTT)
       {
-        reply += F("<TR><TD>Controller Subscribe:<TD><input type='text' name='controllersubscribe' size=64 value='");
-        reply += ControllerSettings.Subscribe;
-        reply += F("'>");
+        addFormTextBox(reply, F("Controller Subscribe"), F("controllersubscribe"), ControllerSettings.Subscribe, sizeof(ControllerSettings.Subscribe)-1);
       }
 
       if (Protocol[ProtocolIndex].usesTemplate || Protocol[ProtocolIndex].usesMQTT)
       {
-        reply += F("<TR><TD>Controller Publish:<TD><input type='text' name='controllerpublish'  size=64 value='");
-        reply += ControllerSettings.Publish;
-        reply += F("'>");
+        addFormTextBox(reply, F("Controller Publish"), F("controllerpublish"), ControllerSettings.Publish, sizeof(ControllerSettings.Publish)-1);
       }
 
-      reply += F("<TR><TD>Enabled:<TD>");
-      if (Settings.ControllerEnabled[index - 1])
-        reply += F("<input type=checkbox name=controllerenabled checked>");
-      else
-        reply += F("<input type=checkbox name=controllerenabled>");
+      addFormCheckBox(reply, F("Enabled"), F("controllerenabled"), Settings.ControllerEnabled[index - 1]);
 
-      TempEvent.ProtocolIndex = index - 1;
+      TempEvent.ControllerIndex = index - 1;
+      TempEvent.ProtocolIndex = ProtocolIndex;
       CPlugin_ptr[ProtocolIndex](CPLUGIN_WEBFORM_LOAD, &TempEvent, reply);
 
     }
-    reply += F("<TR><TD><TD><a class=\"button-link\" href=\"controllers\">Close</a>");
-    reply += F("<input class=\"button-link\" type='submit' value='Submit'>");
+
+    addFormSeparator(reply);
+
+    reply += F("<TR><TD><TD><a class='button link' href=\"controllers\">Close</a>");
+    addSubmitButton(reply);
     reply += F("</table></form>");
   }
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -655,6 +923,7 @@ void handle_notifications() {
   struct EventStruct TempEvent;
   char tmpString[64];
 
+  navMenuIndex = 6;
   String notificationindex = WebServer.arg(F("index"));
   String notification = WebServer.arg(F("notification"));
   String domain = WebServer.arg(F("domain"));
@@ -710,11 +979,11 @@ void handle_notifications() {
       reply += F("<span style=\"color:red\">Error saving to flash!</span>");
   }
 
-  reply += F("<form name='frmselect' method='post'><table>");
+  reply += F("<form name='frmselect' method='post'>");
 
   if (index == 0)
   {
-    reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH>");
+    reply += F("<table border=1px frame='box' rules='all'><TR><TH>");
     reply += F("<TH>Nr<TH>Enabled<TH>Service<TH>Server<TH>Port");
 
     NotificationSettingsStruct NotificationSettings;
@@ -722,7 +991,7 @@ void handle_notifications() {
     {
       LoadNotificationSettings(x, (byte*)&NotificationSettings, sizeof(NotificationSettings));
       reply += F("<TR><TD>");
-      reply += F("<a class=\"button-link\" href=\"notifications?index=");
+      reply += F("<a class='button link' href=\"notifications?index=");
       reply += x + 1;
       reply += F("\">Edit</a>");
       reply += F("<TD>");
@@ -730,10 +999,7 @@ void handle_notifications() {
       reply += F("<TD>");
       if (Settings.Notification[x] != 0)
       {
-        if (Settings.NotificationEnabled[x])
-          reply += F("<span style=\"color:green\">Yes</span>");
-        else
-          reply += F("<span style=\"color:red\">No</span>");
+        addEnabled(reply, Settings.NotificationEnabled[x]);
 
         reply += F("<TD>");
         byte NotificationProtocolIndex = getNotificationIndex(Settings.Notification[x]);
@@ -748,31 +1014,30 @@ void handle_notifications() {
       else
         reply += F("<TD><TD><TD>");
     }
-    reply += F("</table>");
+    reply += F("</table></form>");
   }
   else
   {
-    reply += F("<TH>Notification Settings<TH>");
+    reply += F("<table><TR><TH>Notification Settings<TH>");
     reply += F("<TR><TD>Notification:");
     byte choice = Settings.Notification[index - 1];
-    reply += F("<TD><select name='notification' LANGUAGE=javascript onchange=\"return dept_onchange(frmselect)\" >");
-    reply += F("<option value='0'>- None -</option>");
+    reply += F("<TD>");
+    addSelector_Head(reply, F("notification"), true);
+    addSelector_Item(reply, F("- None -"), 0, false, false, F(""));
     for (byte x = 0; x <= notificationCount; x++)
     {
-      reply += F("<option value='");
-      reply += Notification[x].Number;
-      reply += "'";
-      if (choice == Notification[x].Number)
-        reply += F(" selected");
-      reply += ">";
-
       String NotificationName = "";
       NPlugin_ptr[x](NPLUGIN_GET_DEVICENAME, 0, NotificationName);
-      reply += NotificationName;
-      reply += F("</option>");
+      addSelector_Item(reply,
+                       NotificationName,
+                       Notification[x].Number,
+                       choice == Notification[x].Number,
+                       false,
+                       F(""));
     }
-    reply += F("</select>");
-    reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/EasyNotifications\" target=\"_blank\">?</a>");
+    addSelector_Foot(reply);
+
+    addHelpButton(reply, F("EasyNotifications"));
 
 
     char str[20];
@@ -822,21 +1087,21 @@ void handle_notifications() {
       }
 
       reply += F("<TR><TD>Enabled:<TD>");
-      if (Settings.NotificationEnabled[index - 1])
-        reply += F("<input type=checkbox name=notificationenabled checked>");
-      else
-        reply += F("<input type=checkbox name=notificationenabled>");
+      addCheckBox(reply, F("notificationenabled"), Settings.NotificationEnabled[index - 1]);
 
       TempEvent.NotificationIndex = index - 1;
       NPlugin_ptr[NotificationProtocolIndex](NPLUGIN_WEBFORM_LOAD, &TempEvent, reply);
 
     }
-    reply += F("<TR><TD><TD><a class=\"button-link\" href=\"notifications\">Close</a>");
-    reply += F("<input class=\"button-link\" type='submit' value='Submit'>");
+
+    addFormSeparator(reply);
+
+    reply += F("<TR><TD><TD><a class='button link' href=\"notifications\">Close</a>");
+    addSubmitButton(reply);
     reply += F("</table></form>");
   }
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -846,183 +1111,160 @@ void handle_notifications() {
 void handle_hardware() {
   if (!isLoggedIn()) return;
 
-  String pin_i2c_sda = WebServer.arg(F("psda"));
-  String pin_i2c_scl = WebServer.arg(F("pscl"));
-  String pin_status_led = WebServer.arg(F("pled"));
-  String pin_sd_cs = WebServer.arg(F("sd"));
-
+  navMenuIndex = 3;
   String reply = "";
   addHeader(true, reply);
 
-  if (pin_i2c_sda.length() != 0)
+  if (isFormItem(F("psda")))
   {
-    Settings.Pin_i2c_sda     = pin_i2c_sda.toInt();
-    Settings.Pin_i2c_scl     = pin_i2c_scl.toInt();
-    Settings.Pin_status_led  = pin_status_led.toInt();
-    Settings.Pin_sd_cs  = pin_sd_cs.toInt();
-    Settings.PinBootStates[0]  =  WebServer.arg(F("p0")).toInt();
-    Settings.PinBootStates[2]  =  WebServer.arg(F("p2")).toInt();
-    Settings.PinBootStates[4]  =  WebServer.arg(F("p4")).toInt();
-    Settings.PinBootStates[5]  =  WebServer.arg(F("p5")).toInt();
-    Settings.PinBootStates[9]  =  WebServer.arg(F("p9")).toInt();
-    Settings.PinBootStates[10] =  WebServer.arg(F("p10")).toInt();
-    Settings.PinBootStates[12] =  WebServer.arg(F("p12")).toInt();
-    Settings.PinBootStates[13] =  WebServer.arg(F("p13")).toInt();
-    Settings.PinBootStates[14] =  WebServer.arg(F("p14")).toInt();
-    Settings.PinBootStates[15] =  WebServer.arg(F("p15")).toInt();
-    Settings.PinBootStates[16] =  WebServer.arg(F("p16")).toInt();
+    Settings.Pin_status_led  = getFormItemInt(F("pled"));
+    Settings.Pin_status_led_Inversed  = isFormItemChecked(F("pledi"));
 
-    Settings.InitSPI = WebServer.arg(F("initspi")) == "on";      // SPI Init
+    Settings.Pin_i2c_sda     = getFormItemInt(F("psda"));
+    Settings.Pin_i2c_scl     = getFormItemInt(F("pscl"));
+
+    Settings.InitSPI = isFormItemChecked(F("initspi"));      // SPI Init
+    Settings.Pin_sd_cs  = getFormItemInt(F("sd"));
+
+    Settings.PinBootStates[0]  =  getFormItemInt(F("p0"));
+    Settings.PinBootStates[2]  =  getFormItemInt(F("p2"));
+    Settings.PinBootStates[4]  =  getFormItemInt(F("p4"));
+    Settings.PinBootStates[5]  =  getFormItemInt(F("p5"));
+    Settings.PinBootStates[9]  =  getFormItemInt(F("p9"));
+    Settings.PinBootStates[10] =  getFormItemInt(F("p10"));
+    Settings.PinBootStates[12] =  getFormItemInt(F("p12"));
+    Settings.PinBootStates[13] =  getFormItemInt(F("p13"));
+    Settings.PinBootStates[14] =  getFormItemInt(F("p14"));
+    Settings.PinBootStates[15] =  getFormItemInt(F("p15"));
+    Settings.PinBootStates[16] =  getFormItemInt(F("p16"));
 
     if (!SaveSettings())
       reply += F("<span style=\"color:red\">Error saving to flash!</span>");
-
   }
 
-  reply += F("<form  method='post'><table><TH>Hardware Settings<TH><TR><TD>");
-  reply += F("<TR><TD>Wifi Status Led:<TD>");
-  addPinSelect(false, reply, "pled", Settings.Pin_status_led);
-  reply += F("<TR><TD>SDA:<TD>");
-  addPinSelect(true, reply, "psda", Settings.Pin_i2c_sda);
-  reply += F("<TR><TD>SCL:<TD>");
-  addPinSelect(true, reply, "pscl", Settings.Pin_i2c_scl);
+  reply += F("<form  method='post'><table><TR><TH>Hardware Settings<TH><TR><TD>");
+  addFormSubHeader(reply, F("Wifi Status LED"));
+
+  addFormPinSelect(reply, F("GPIO &rarr; LED"), "pled", Settings.Pin_status_led);
+  addFormCheckBox(reply, F("Inversed LED"), F("pledi"), Settings.Pin_status_led_Inversed);
+  addFormNote(reply, F("Use &rsquo;GPIO-2 (D4)&rsquo; with &rsquo;Inversed&rsquo; checked for onboard LED"));
+
+  addFormSubHeader(reply, F("I2C Interface"));
+
+  addFormPinSelectI2C(reply, F("GPIO &#8703; SDA"), F("psda"), Settings.Pin_i2c_sda);
+  addFormPinSelectI2C(reply, F("GPIO &#8702; SCL"), F("pscl"), Settings.Pin_i2c_scl);
 
   // SPI Init
-  reply += F("<TR><TD>Init SPI:<TD>");
-  if (Settings.InitSPI)
-    reply += F("<input type=checkbox id='initspi'  name='initspi' checked>&nbsp;");
-  else
-    reply += F("<input type=checkbox id='initspi' name='initspi'>&nbsp;");
-  reply += F("(Note : Chip Select (CS) config must be done in the plugin)");
+  addFormSubHeader(reply, F("SPI Interface"));
 
-  reply += F("<TR><TD>SD Card CS Pin:<TD>");
-  addPinSelect(false, reply, "sd", Settings.Pin_sd_cs);
+  addFormCheckBox(reply, F("Init SPI"), F("initspi"), Settings.InitSPI);
+  addFormNote(reply, F("CLK=GPIO-14 (D5), MISO=GPIO-12 (D6), MOSI=GPIO-13 (D7)"));
+  addFormNote(reply, F("Chip Select (CS) config must be done in the plugin"));
+  addFormPinSelect(reply, F("GPIO &rarr; SD Card CS"), "sd", Settings.Pin_sd_cs);
 
-  reply += F("<TR><TD>GPIO boot states:<TD>");
-  reply += F("<TR><TD>Pin mode 0 (D3):<TD>");
-  addPinStateSelect(reply, "p0", Settings.PinBootStates[0]);
-  reply += F("<TR><TD>Pin mode 2 (D4):<TD>");
-  addPinStateSelect(reply, "p2", Settings.PinBootStates[2]);
-  reply += F("<TR><TD>Pin mode 4 (D2):<TD>");
-  addPinStateSelect(reply, "p4", Settings.PinBootStates[4]);
-  reply += F("<TR><TD>Pin mode 5 (D1):<TD>");
-  addPinStateSelect(reply, "p5", Settings.PinBootStates[5]);
-  reply += F("<TR><TD>Pin mode 9 (D11):<TD>");
-  addPinStateSelect(reply, "p9", Settings.PinBootStates[9]);
-  reply += F("<TR><TD>Pin mode 10 (D12):<TD>");
-  addPinStateSelect(reply, "p10", Settings.PinBootStates[10]);
-  reply += F("<TR><TD>Pin mode 12 (D6):<TD>");
-  addPinStateSelect(reply, "p12", Settings.PinBootStates[12]);
-  reply += F("<TR><TD>Pin mode 13 (D7):<TD>");
-  addPinStateSelect(reply, "p13", Settings.PinBootStates[13]);
-  reply += F("<TR><TD>Pin mode 14 (D5):<TD>");
-  addPinStateSelect(reply, "p14", Settings.PinBootStates[14]);
-  reply += F("<TR><TD>Pin mode 15 (D8):<TD>");
-  addPinStateSelect(reply, "p15", Settings.PinBootStates[15]);
-  reply += F("<TR><TD>Pin mode 16 (D0):<TD>");
-  addPinStateSelect(reply, "p16", Settings.PinBootStates[16]);
+  addFormSubHeader(reply, F("GPIO boot states"));
 
-  reply += F("<TR><TD><TD><input class=\"button-link\" type='submit' value='Submit'><TR><TD>");
+  addFormPinStateSelect(reply, F("Pin mode 0 (D3)"), F("p0"), Settings.PinBootStates[0]);
+  addFormPinStateSelect(reply, F("Pin mode 2 (D4)"), F("p2"), Settings.PinBootStates[2]);
+  addFormPinStateSelect(reply, F("Pin mode 4 (D2)"), F("p4"), Settings.PinBootStates[4]);
+  addFormPinStateSelect(reply, F("Pin mode 5 (D1)"), F("p5"), Settings.PinBootStates[5]);
+  addFormPinStateSelect(reply, F("Pin mode 9 (D11)"), F("p9"), Settings.PinBootStates[9]);
+  addFormPinStateSelect(reply, F("Pin mode 10 (D12)"), F("p10"), Settings.PinBootStates[10]);
+  addFormPinStateSelect(reply, F("Pin mode 12 (D6)"), F("p12"), Settings.PinBootStates[12]);
+  addFormPinStateSelect(reply, F("Pin mode 13 (D7)"), F("p13"), Settings.PinBootStates[13]);
+  addFormPinStateSelect(reply, F("Pin mode 14 (D5)"), F("p14"), Settings.PinBootStates[14]);
+  addFormPinStateSelect(reply, F("Pin mode 15 (D8)"), F("p15"), Settings.PinBootStates[15]);
+  addFormPinStateSelect(reply, F("Pin mode 16 (D0)"), F("p16"), Settings.PinBootStates[16]);
 
-  reply += F("</table></form>");
+  addFormSeparator(reply);
+
+  reply += F("<TR><TD><TD>");
+  addSubmitButton(reply);
+  addHelpButton(reply, F("ESPEasy#Hardware_page"));
+
+  reply += F("<TR><TD></table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
 //********************************************************************************
 // Add a GPIO pin select dropdown list
 //********************************************************************************
-void addPinStateSelect(String& str, String name,  int choice)
+void addFormPinStateSelect(String& str, const String& label, const String& id, int choice)
 {
-  String options[4];
-  options[0] = F("Default");
-  options[1] = F("Output Low");
-  options[2] = F("Output High");
-  options[3] = F("Input");
-  int optionValues[4];
-  optionValues[0] = 0;
-  optionValues[1] = 1;
-  optionValues[2] = 2;
-  optionValues[3] = 3;
+  addRowLabel(str, label);
+  addPinStateSelect(str, id, choice);
+}
 
-  str += F("<select name='");
-  str += name;
-  str += "'>";
-  for (byte x = 0; x < 4; x++)
-  {
-    str += F("<option value='");
-    str += optionValues[x];
-    str += "'";
-    if (choice == optionValues[x])
-      str += F(" selected");
-    str += ">";
-    str += options[x];
-    str += F("</option>");
-  }
-  str += F("</select>");
+void addPinStateSelect(String& str, String name, int choice)
+{
+  String options[4] = { F("Default"), F("Output Low"), F("Output High"), F("Input") };
+  addSelector(str, name, 4, options, NULL, NULL, choice, false);
 }
 
 
 //********************************************************************************
 // Web Interface device page
 //********************************************************************************
+//19480 (11128)
 void handle_devices() {
   if (!isLoggedIn()) return;
 
-  char tmpString[41];
+  navMenuIndex = 4;
+  // char tmpString[41];
   struct EventStruct TempEvent;
 
-  String taskindex = WebServer.arg(F("index"));
-  String taskdevicenumber = WebServer.arg(F("taskdevicenumber"));
-  String taskdevicetimer = WebServer.arg(F("taskdevicetimer"));
-  String taskdeviceid[CONTROLLER_MAX];
-  String taskdevicepin1 = WebServer.arg(F("taskdevicepin1"));
-  String taskdevicepin2 = WebServer.arg(F("taskdevicepin2"));
-  String taskdevicepin3 = WebServer.arg(F("taskdevicepin3"));
-  String taskdevicepin1pullup = WebServer.arg(F("taskdevicepin1pullup"));
-  String taskdevicepin1inversed = WebServer.arg(F("taskdevicepin1inversed"));
-  String taskdevicename = WebServer.arg(F("taskdevicename"));
-  String taskdeviceport = WebServer.arg(F("taskdeviceport"));
-  String taskdeviceformula[VARS_PER_TASK];
-  String taskdevicevaluename[VARS_PER_TASK];
-  String taskdevicevaluedecimals[VARS_PER_TASK];
-  String taskdevicesenddata[CONTROLLER_MAX];
-  String taskdeviceglobalsync = WebServer.arg(F("taskdeviceglobalsync"));
-  String taskdeviceenabled = WebServer.arg(F("taskdeviceenabled"));
+  // String taskindex = WebServer.arg(F("index"));
+  byte taskdevicenumber = WebServer.arg(F("TDNUM")).toInt();
+  unsigned long taskdevicetimer = WebServer.arg(F("TDT")).toInt();
+  // String taskdeviceid[CONTROLLER_MAX];
+  // String taskdevicepin1 = WebServer.arg(F("taskdevicepin1"));   // "taskdevicepin*" should not be changed because it is uses by plugins and expected to be saved by this code
+  // String taskdevicepin2 = WebServer.arg(F("taskdevicepin2"));
+  // String taskdevicepin3 = WebServer.arg(F("taskdevicepin3"));
+  // String taskdevicepin1pullup = WebServer.arg(F("TDPPU"));
+  // String taskdevicepin1inversed = WebServer.arg(F("TDPI"));
+  // String taskdevicename = WebServer.arg(F("TDN"));
+  // String taskdeviceport = WebServer.arg(F("TDP"));
+  // String taskdeviceformula[VARS_PER_TASK];
+  // String taskdevicevaluename[VARS_PER_TASK];
+  // String taskdevicevaluedecimals[VARS_PER_TASK];
+  // String taskdevicesenddata[CONTROLLER_MAX];
+  // String taskdeviceglobalsync = WebServer.arg(F("TDGS"));
+  // String taskdeviceenabled = WebServer.arg(F("TDE"));
 
-  for (byte varNr = 0; varNr < VARS_PER_TASK; varNr++)
-  {
-    char argc[25];
-    String arg = F("taskdeviceformula");
-    arg += varNr + 1;
-    arg.toCharArray(argc, 25);
-    taskdeviceformula[varNr] = WebServer.arg(argc);
+  // for (byte varNr = 0; varNr < VARS_PER_TASK; varNr++)
+  // {
+  //   char argc[25];
+  //   String arg = F("TDF");
+  //   arg += varNr + 1;
+  //   arg.toCharArray(argc, 25);
+  //   taskdeviceformula[varNr] = WebServer.arg(argc);
+  //
+  //   arg = F("TDVN");
+  //   arg += varNr + 1;
+  //   arg.toCharArray(argc, 25);
+  //   taskdevicevaluename[varNr] = WebServer.arg(argc);
+  //
+  //   arg = F("TDVD");
+  //   arg += varNr + 1;
+  //   arg.toCharArray(argc, 25);
+  //   taskdevicevaluedecimals[varNr] = WebServer.arg(argc);
+  // }
 
-    arg = F("taskdevicevaluename");
-    arg += varNr + 1;
-    arg.toCharArray(argc, 25);
-    taskdevicevaluename[varNr] = WebServer.arg(argc);
-
-    arg = F("taskdevicevaluedecimals");
-    arg += varNr + 1;
-    arg.toCharArray(argc, 25);
-    taskdevicevaluedecimals[varNr] = WebServer.arg(argc);
-  }
-
-  for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
-  {
-    char argc[25];
-    String arg = F("taskdeviceid");
-    arg += controllerNr + 1;
-    arg.toCharArray(argc, 25);
-    taskdeviceid[controllerNr] = WebServer.arg(argc);
-
-    arg = F("taskdevicesenddata");
-    arg += controllerNr + 1;
-    arg.toCharArray(argc, 25);
-    taskdevicesenddata[controllerNr] = WebServer.arg(argc);
-  }
+  // for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
+  // {
+  //   char argc[25];
+  //   String arg = F("TDID");
+  //   arg += controllerNr + 1;
+  //   arg.toCharArray(argc, 25);
+  //   taskdeviceid[controllerNr] = WebServer.arg(argc);
+  //
+  //   arg = F("TDSD");
+  //   arg += controllerNr + 1;
+  //   arg.toCharArray(argc, 25);
+  //   taskdevicesenddata[controllerNr] = WebServer.arg(argc);
+  // }
 
   String edit = WebServer.arg(F("edit"));
   byte page = WebServer.arg(F("page")).toInt();
@@ -1041,30 +1283,32 @@ void handle_devices() {
   //reply.reserve(8192);
   addHeader(true, reply);
 
-  byte index = taskindex.toInt();
+  byte index = WebServer.arg(F("index")).toInt();
 
   byte DeviceIndex = 0;
 
   if (edit.toInt() != 0) // when form submitted
   {
-    if (Settings.TaskDeviceNumber[index - 1] != taskdevicenumber.toInt()) // change of device, clear all other values
+    if (Settings.TaskDeviceNumber[index - 1] != taskdevicenumber) // change of device, clear all other values
     {
+      TempEvent.TaskIndex = index - 1;
+      PluginCall(PLUGIN_EXIT, &TempEvent, dummyString);
+
       taskClear(index - 1, false); // clear settings, but do not save
-      Settings.TaskDeviceNumber[index - 1] = taskdevicenumber.toInt();
-      if (taskdevicenumber.toInt() != 0) // preload valuenames
+      Settings.TaskDeviceNumber[index - 1] = taskdevicenumber;
+      if (taskdevicenumber != 0) // preload valuenames
       {
-        TempEvent.TaskIndex = index - 1;
         if (ExtraTaskSettings.TaskDeviceValueNames[0][0] == 0) // if field set empty, reload defaults
           PluginCall(PLUGIN_GET_DEVICEVALUENAMES, &TempEvent, dummyString);
       }
     }
-    else if (taskdevicenumber.toInt() != 0)
+    else if (taskdevicenumber != 0)
     {
-      Settings.TaskDeviceNumber[index - 1] = taskdevicenumber.toInt();
+      Settings.TaskDeviceNumber[index - 1] = taskdevicenumber;
       DeviceIndex = getDeviceIndex(Settings.TaskDeviceNumber[index - 1]);
 
-      if (taskdevicetimer.toInt() > 0)
-        Settings.TaskDeviceTimer[index - 1] = taskdevicetimer.toInt();
+      if (taskdevicetimer > 0)
+        Settings.TaskDeviceTimer[index - 1] = taskdevicetimer;
       else
       {
         if (!Device[DeviceIndex].TimerOptional) // Set default delay, unless it's optional...
@@ -1073,40 +1317,36 @@ void handle_devices() {
           Settings.TaskDeviceTimer[index - 1] = 0;
       }
 
-      taskdevicename.toCharArray(tmpString, 41);
-      Settings.TaskDeviceEnabled[index - 1] = (taskdeviceenabled == "on");
-      strcpy(ExtraTaskSettings.TaskDeviceName, tmpString);
-      Settings.TaskDevicePort[index - 1] = taskdeviceport.toInt();
+      Settings.TaskDeviceEnabled[index - 1] = (WebServer.arg(F("TDE")) == F("on"));
+      strcpy(ExtraTaskSettings.TaskDeviceName, WebServer.arg(F("TDN")).c_str());
+      Settings.TaskDevicePort[index - 1] =  WebServer.arg(F("TDP")).toInt();
 
       for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
       {
-        Settings.TaskDeviceID[controllerNr][index - 1] = taskdeviceid[controllerNr].toInt();
-        Settings.TaskDeviceSendData[controllerNr][index - 1] = (taskdevicesenddata[controllerNr] == "on");
+
+        Settings.TaskDeviceID[controllerNr][index - 1] = WebServer.arg(String(F("TDID")) + (controllerNr + 1)).toInt();
+        Settings.TaskDeviceSendData[controllerNr][index - 1] = (WebServer.arg(String(F("TDSD")) + (controllerNr + 1)) == F("on"));
       }
 
-      if (Device[DeviceIndex].Type == DEVICE_TYPE_SINGLE)
-      {
-        Settings.TaskDevicePin1[index - 1] = taskdevicepin1.toInt();
-      }
-      if (Device[DeviceIndex].Type == DEVICE_TYPE_DUAL)
-      {
-        Settings.TaskDevicePin1[index - 1] = taskdevicepin1.toInt();
-        Settings.TaskDevicePin2[index - 1] = taskdevicepin2.toInt();
-      }
+      if (WebServer.arg(F("taskdevicepin1")).length() != 0)
+        Settings.TaskDevicePin1[index - 1] = WebServer.arg(F("taskdevicepin1")).toInt();
 
-      if (taskdevicepin3.length() != 0)
-        Settings.TaskDevicePin3[index - 1] = taskdevicepin3.toInt();
+      if (WebServer.arg(F("taskdevicepin2")).length() != 0)
+        Settings.TaskDevicePin2[index - 1] = WebServer.arg(F("taskdevicepin2")).toInt();
+
+      if (WebServer.arg(F("taskdevicepin3")).length() != 0)
+        Settings.TaskDevicePin3[index - 1] = WebServer.arg(F("taskdevicepin3")).toInt();
 
       if (Device[DeviceIndex].PullUpOption)
-        Settings.TaskDevicePin1PullUp[index - 1] = (taskdevicepin1pullup == "on");
+        Settings.TaskDevicePin1PullUp[index - 1] = (WebServer.arg(F("TDPPU")) == F("on"));
 
       if (Device[DeviceIndex].InverseLogicOption)
-        Settings.TaskDevicePin1Inversed[index - 1] = (taskdevicepin1inversed == "on");
+        Settings.TaskDevicePin1Inversed[index - 1] = (WebServer.arg(F("TDPI")) == F("on"));
 
       if (Settings.GlobalSync)
       {
         if (Device[DeviceIndex].GlobalSyncOption)
-          Settings.TaskDeviceGlobalSync[index - 1] = (taskdeviceglobalsync == "on");
+          Settings.TaskDeviceGlobalSync[index - 1] = (WebServer.arg(F("TDGS")) == F("on"));
 
         // Send task info if set global
         if (Settings.TaskDeviceGlobalSync[index - 1])
@@ -1117,17 +1357,24 @@ void handle_devices() {
 
       for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
       {
-        taskdeviceformula[varNr].toCharArray(tmpString, 41);
-        strcpy(ExtraTaskSettings.TaskDeviceFormula[varNr], tmpString);
-        ExtraTaskSettings.TaskDeviceValueDecimals[varNr] = taskdevicevaluedecimals[varNr].toInt();
+
+        strcpy(ExtraTaskSettings.TaskDeviceFormula[varNr], WebServer.arg(String(F("TDF")) + (varNr + 1)).c_str());
+        ExtraTaskSettings.TaskDeviceValueDecimals[varNr] = WebServer.arg(String(F("TDVD")) + (varNr + 1)).toInt();
+        strcpy(ExtraTaskSettings.TaskDeviceValueNames[varNr], WebServer.arg(String(F("TDVN")) + (varNr + 1)).c_str());
+
+        // taskdeviceformula[varNr].toCharArray(tmpString, 41);
+        // strcpy(ExtraTaskSettings.TaskDeviceFormula[varNr], tmpString);
+        // ExtraTaskSettings.TaskDeviceValueDecimals[varNr] = taskdevicevaluedecimals[varNr].toInt();
+        // taskdevicevaluename[varNr].toCharArray(tmpString, 41);
+
       }
 
-      // task value names handling.
-      for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
-      {
-        taskdevicevaluename[varNr].toCharArray(tmpString, 41);
-        strcpy(ExtraTaskSettings.TaskDeviceValueNames[varNr], tmpString);
-      }
+      // // task value names handling.
+      // for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
+      // {
+      //   taskdevicevaluename[varNr].toCharArray(tmpString, 41);
+      //   strcpy(ExtraTaskSettings.TaskDeviceValueNames[varNr], tmpString);
+      // }
 
       TempEvent.TaskIndex = index - 1;
       if (ExtraTaskSettings.TaskDeviceValueNames[0][0] == 0) // if field set empty, reload defaults
@@ -1138,35 +1385,35 @@ void handle_devices() {
     SaveTaskSettings(index - 1);
     if (!SaveSettings())
       reply += F("<span style=\"color:red\">Error saving to flash!</span>");
-    if (taskdevicenumber.toInt() != 0 && Settings.TaskDeviceEnabled[index - 1])
+    if (taskdevicenumber != 0 && Settings.TaskDeviceEnabled[index - 1])
       PluginCall(PLUGIN_INIT, &TempEvent, dummyString);
   }
 
   // show all tasks as table
   if (index == 0)
   {
-    reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH>");
-    reply += F("<a class=\"button-link\" href=\"devices?setpage=");
+    reply += F("<table border=1px frame='box' rules='all'><TR><TH>");
+    reply += F("<a class='button link' href=\"devices?setpage=");
     if (page > 1)
       reply += page - 1;
     else
       reply += page;
-    reply += F("\"><</a>");
-    reply += F("<a class=\"button-link\" href=\"devices?setpage=");
+    reply += F("\">&lt;</a>");
+    reply += F("<a class='button link' href=\"devices?setpage=");
     if (page < (TASKS_MAX / 4))
       reply += page + 1;
     else
       reply += page;
-    reply += F("\">></a>");
+    reply += F("\">&gt;</a>");
 
-    reply += F("<TH>Task<TH>Enabled<TH>Device<TH>Name<TH>Port<TH>IDX/Variable<TH>GPIO<TH>Values");
+    reply += F("<TH>Task<TH>Enabled<TH>Device<TH>Name<TH>Port<TH>Ctr (IDX)<TH>GPIO<TH>Values");
 
     String deviceName;
 
     for (byte x = (page - 1) * 4; x < ((page) * 4); x++)
     {
       reply += F("<TR><TD>");
-      reply += F("<a class=\"button-link\" href=\"devices?index=");
+      reply += F("<a class='button link' href=\"devices?index=");
       reply += x + 1;
       reply += F("&page=");
       reply += page;
@@ -1184,10 +1431,7 @@ void handle_devices() {
         deviceName = "";
         Plugin_ptr[DeviceIndex](PLUGIN_GET_DEVICENAME, &TempEvent, deviceName);
 
-        if (Settings.TaskDeviceEnabled[x])
-          reply += F("<span style=\"color:green\">Yes</span>");
-        else
-          reply += F("<span style=\"color:red\">No</span>");
+        addEnabled(reply, Settings.TaskDeviceEnabled[x]);
 
         reply += F("<TD>");
         reply += deviceName;
@@ -1203,12 +1447,28 @@ void handle_devices() {
 
         reply += F("<TD>");
 
-        for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
+        if (Device[DeviceIndex].SendDataOption)
         {
-          if (Settings.TaskDeviceID[controllerNr][x] != 0)
-            reply += Settings.TaskDeviceID[controllerNr][x];
-          if (x < CONTROLLER_MAX)
-            reply += F("<BR>");
+          boolean doBR = false;
+          for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
+          {
+            byte ProtocolIndex = getProtocolIndex(Settings.Protocol[controllerNr]);
+            if (Settings.TaskDeviceSendData[controllerNr][x])
+            {
+              if (doBR)
+                reply += F("<BR>");
+              reply += getControllerSymbol(controllerNr);
+              if (Protocol[ProtocolIndex].usesID && Settings.Protocol[controllerNr] != 0)
+              {
+                reply += F(" (");
+                reply += Settings.TaskDeviceID[controllerNr][x];
+                reply += F(")");
+                if (Settings.TaskDeviceID[controllerNr][x] == 0)
+                  reply += F(" " HTML_SYMBOL_WARNING);
+              }
+              doBR = true;
+            }
+          }
         }
 
         reply += F("<TD>");
@@ -1279,7 +1539,7 @@ void handle_devices() {
         reply += F("<TD><TD><TD><TD><TD><TD>");
 
     } // next
-    reply += F("</table>");
+    reply += F("</table></form>");
   }
   // Show edit form if a specific entry is chosen with the edit button
   else
@@ -1288,193 +1548,172 @@ void handle_devices() {
     DeviceIndex = getDeviceIndex(Settings.TaskDeviceNumber[index - 1]);
     TempEvent.TaskIndex = index - 1;
 
-    reply += F("<form name='frmselect' method='post'><table><TH>Task Settings<TH>Value");
+    reply += F("<form name='frmselect' method='post'><table>");
+    addFormHeader(reply, F("Task Settings"));
 
     reply += F("<TR><TD>Device:<TD>");
-    addDeviceSelect(reply, "taskdevicenumber", Settings.TaskDeviceNumber[index - 1]);
+    addDeviceSelect(reply, "TDNUM", Settings.TaskDeviceNumber[index - 1]);   //="taskdevicenumber"
 
-    if (Settings.TaskDeviceNumber[index - 1] != 0 )
+    if (Settings.TaskDeviceNumber[index - 1] != 0 )   //any device selected?
     {
-      reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/Plugin");
-      reply += Settings.TaskDeviceNumber[index - 1];
-      reply += F("\" target=\"_blank\">?</a>");
+      addHelpButton(reply, String(F("Plugin")) + Settings.TaskDeviceNumber[index - 1]);
 
-      reply += F("<TR><TD>Name:<TD><input type='text' maxlength='40' name='taskdevicename' value='");
-      reply += ExtraTaskSettings.TaskDeviceName;
-      reply += F("'>");
+      addFormTextBox(reply, F("Name"), F("TDN"), ExtraTaskSettings.TaskDeviceName, 40);   //="taskdevicename"
 
-      if (Device[DeviceIndex].TimerOption)
+      addFormCheckBox(reply, F("Enabled"), F("TDE"), Settings.TaskDeviceEnabled[index - 1]);   //="taskdeviceenabled"
+
+      if (Settings.GlobalSync && Device[DeviceIndex].GlobalSyncOption && Settings.TaskDeviceDataFeed[index - 1] == 0 && Settings.UDPPort != 0)
       {
-        reply += F("<TR><TD>Delay:<TD><input type='text' name='taskdevicetimer' value='");
-        reply += Settings.TaskDeviceTimer[index - 1];
-        reply += F("'>");
-        if (Device[DeviceIndex].TimerOptional)
-          reply += F(" (Optional for this device)");
+        addFormCheckBox(reply, F("Global Sync"), F("TDGS"), Settings.TaskDeviceGlobalSync[index - 1]);   //="taskdeviceglobalsync"
       }
 
-      if (!Device[DeviceIndex].Custom)
+      // section: Sensor / Actuator
+      if (!Device[DeviceIndex].Custom && Settings.TaskDeviceDataFeed[index - 1] == 0 &&
+          ((Device[DeviceIndex].Ports != 0) || (Device[DeviceIndex].PullUpOption) || (Device[DeviceIndex].InverseLogicOption) || (Device[DeviceIndex].Type >= DEVICE_TYPE_SINGLE && Device[DeviceIndex].Type <= DEVICE_TYPE_TRIPLE)) )
       {
-        for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
-        {
-          byte ProtocolIndex = getProtocolIndex(Settings.Protocol[controllerNr]);
-          if (Protocol[ProtocolIndex].usesID && Settings.Protocol[controllerNr] != 0)
-          {
-            reply += F("<TR><TD>IDX / Var for controller ");
-            reply += controllerNr + 1;
-            reply += F("<TD><input type='text' name='taskdeviceid");
-            reply += controllerNr + 1;
-            reply += F("' value='");
-            reply += Settings.TaskDeviceID[controllerNr][index - 1];
-            reply += F("'>");
-          }
-        }
-      }
+        addFormSubHeader(reply, (Device[DeviceIndex].SendDataOption) ? F("Sensor") : F("Actuator"));
 
-      if (!Device[DeviceIndex].Custom && Settings.TaskDeviceDataFeed[index - 1] == 0)
-      {
         if (Device[DeviceIndex].Ports != 0)
-        {
-          reply += F("<TR><TD>Port:<TD><input type='text' name='taskdeviceport' value='");
-          reply += Settings.TaskDevicePort[index - 1];
-          reply += F("'>");
-        }
-
-        if (Device[DeviceIndex].Type == DEVICE_TYPE_SINGLE || Device[DeviceIndex].Type == DEVICE_TYPE_DUAL)
-        {
-          reply += F("<TR><TD>1st GPIO:<TD>");
-          addPinSelect(false, reply, "taskdevicepin1", Settings.TaskDevicePin1[index - 1]);
-        }
-        if (Device[DeviceIndex].Type == DEVICE_TYPE_DUAL)
-        {
-          reply += F("<TR><TD>2nd GPIO:<TD>");
-          addPinSelect(false, reply, "taskdevicepin2", Settings.TaskDevicePin2[index - 1]);
-        }
+          addFormNumericBox(reply, F("Port"), F("TDP"), Settings.TaskDevicePort[index - 1]);   //="taskdeviceport"
 
         if (Device[DeviceIndex].PullUpOption)
         {
-          reply += F("<TR><TD>Pull UP:<TD>");
-          if (Settings.TaskDevicePin1PullUp[index - 1])
-            reply += F("<input type=checkbox name=taskdevicepin1pullup checked>");
-          else
-            reply += F("<input type=checkbox name=taskdevicepin1pullup>");
+          addFormCheckBox(reply, F("Internal PullUp"), F("TDPPU"), Settings.TaskDevicePin1PullUp[index - 1]);   //="taskdevicepin1pullup"
+          if ((Settings.TaskDevicePin1[index - 1] == 16) || (Settings.TaskDevicePin2[index - 1] == 16) || (Settings.TaskDevicePin3[index - 1] == 16))
+            addFormNote(reply, F("GPIO-16 (D0) does not support PullUp"));
         }
 
         if (Device[DeviceIndex].InverseLogicOption)
         {
-          reply += F("<TR><TD>Inversed:<TD>");
-          if (Settings.TaskDevicePin1Inversed[index - 1])
-            reply += F("<input type=checkbox name=taskdevicepin1inversed checked>");
-          else
-            reply += F("<input type=checkbox name=taskdevicepin1inversed>");
+          addFormCheckBox(reply, F("Inversed Logic"), F("TDPI"), Settings.TaskDevicePin1Inversed[index - 1]);   //="taskdevicepin1inversed"
+          addFormNote(reply, F("Will go into effect on next input change."));
         }
+
+        //get descriptive GPIO-names from plugin
+        TempEvent.String1 = F("1st GPIO");
+        TempEvent.String2 = F("2nd GPIO");
+        TempEvent.String3 = F("3rd GPIO");
+        PluginCall(PLUGIN_GET_DEVICEGPIONAMES, &TempEvent, dummyString);
+
+        if (Device[DeviceIndex].Type >= DEVICE_TYPE_SINGLE && Device[DeviceIndex].Type <= DEVICE_TYPE_TRIPLE)
+          addFormPinSelect(reply, TempEvent.String1, F("taskdevicepin1"), Settings.TaskDevicePin1[index - 1]);
+        if (Device[DeviceIndex].Type >= DEVICE_TYPE_DUAL && Device[DeviceIndex].Type <= DEVICE_TYPE_TRIPLE)
+          addFormPinSelect(reply, TempEvent.String2, F("taskdevicepin2"), Settings.TaskDevicePin2[index - 1]);
+        if (Device[DeviceIndex].Type == DEVICE_TYPE_TRIPLE)
+          addFormPinSelect(reply, TempEvent.String3, F("taskdevicepin3"), Settings.TaskDevicePin3[index - 1]);
       }
 
+      //add plugins content
       if (Settings.TaskDeviceDataFeed[index - 1] == 0) // only show additional config for local connected sensors
         PluginCall(PLUGIN_WEBFORM_LOAD, &TempEvent, reply);
 
+      //section: Data Acquisition
       if (Device[DeviceIndex].SendDataOption)
       {
+        addFormSubHeader(reply, F("Data Acquisition"));
+
         for (byte controllerNr = 0; controllerNr < CONTROLLER_MAX; controllerNr++)
         {
           if (Settings.Protocol[controllerNr] != 0)
           {
-            reply += F("<TR><TD>Send Data to controller ");
-            reply += controllerNr + 1;
-            reply += F("<TD><input type=checkbox name='taskdevicesenddata");
-            reply += controllerNr + 1;
-            reply += F("'");
-            if (Settings.TaskDeviceSendData[controllerNr][index - 1])
-              reply += F(" checked>");
-            else
-              reply += F(">");
+            String id = F("TDSD");   //="taskdevicesenddata"
+            id += controllerNr + 1;
+
+            reply += F("<TR><TD>Send to Controller ");
+            reply += getControllerSymbol(controllerNr);
+            reply += F("<TD>");
+            addCheckBox(reply, id, Settings.TaskDeviceSendData[controllerNr][index - 1]);
+
+            byte ProtocolIndex = getProtocolIndex(Settings.Protocol[controllerNr]);
+            if (Protocol[ProtocolIndex].usesID && Settings.Protocol[controllerNr] != 0)
+            {
+              reply += F(" &nbsp; IDX: ");
+              id = F("TDID");   //="taskdeviceid"
+              id += controllerNr + 1;
+              addNumericBox(reply, id, Settings.TaskDeviceID[controllerNr][index - 1], 0, 9999);
+            }
           }
         }
       }
 
-      if (Settings.GlobalSync && Device[DeviceIndex].GlobalSyncOption && Settings.TaskDeviceDataFeed[index - 1] == 0 && Settings.UDPPort != 0)
+      addFormSeparator(reply);
+
+      if (Device[DeviceIndex].TimerOption)
       {
-        reply += F("<TR><TD>Global Sync:<TD>");
-        if (Settings.TaskDeviceGlobalSync[index - 1])
-          reply += F("<input type=checkbox name=taskdeviceglobalsync checked>");
-        else
-          reply += F("<input type=checkbox name=taskdeviceglobalsync>");
+        //FIXME: shoudnt the max be ULONG_MAX because Settings.TaskDeviceTimer is an unsigned long? addFormNumericBox only supports ints for min and max specification
+        addFormNumericBox(reply, F("Delay"), F("TDT"), Settings.TaskDeviceTimer[index - 1], 0, 65535);   //="taskdevicetimer"
+        addUnit(reply, F("sec"));
+        if (Device[DeviceIndex].TimerOptional)
+          reply += F(" (Optional for this Device)");
       }
 
-      reply += F("<TR><TD>Enabled:<TD>");
-      if (Settings.TaskDeviceEnabled[index - 1])
-        reply += F("<input type=checkbox name=taskdeviceenabled checked>");
-      else
-        reply += F("<input type=checkbox name=taskdeviceenabled>");
-
-      if (!Device[DeviceIndex].Custom)
+      //section: Values
+      if (!Device[DeviceIndex].Custom && Device[DeviceIndex].ValueCount > 0)
       {
-        reply += F("<TR><TH>Optional Settings<TH>Value");
+        addFormSubHeader(reply, F("Values"));
+        reply += F("</table><table>");
+
+        //table header
+        reply += F("<TR><TH>Value");
+        reply += F("<TH>Name");
 
         if (Device[DeviceIndex].FormulaOption)
         {
-          for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
-          {
-            reply += F("<TR><TD>Formula ");
-            reply += ExtraTaskSettings.TaskDeviceValueNames[varNr];
-            reply += F(":<TD><input type='text' maxlength='40' name='taskdeviceformula");
-            reply += varNr + 1;
-            reply += F("' value='");
-            reply += ExtraTaskSettings.TaskDeviceFormula[varNr];
-            reply += F("'>");
-
-            reply += F(" Decimals: <input type='text' name='taskdevicevaluedecimals");
-            reply += varNr + 1;
-            reply += F("' value='");
-            reply += ExtraTaskSettings.TaskDeviceValueDecimals[varNr];
-            reply += F("'>");
-
-            if (varNr == 0)
-              reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/EasyFormula\" target=\"_blank\">?</a>");
-          }
+          reply += F("<TH>Formula");
+          addHelpButton(reply, F("EasyFormula"));
         }
-        else
+
+        if (Device[DeviceIndex].FormulaOption || Device[DeviceIndex].DecimalsOnly)
         {
-          if (Device[DeviceIndex].DecimalsOnly)
-            for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
-            {
-              reply += F("<TR><TD>Decimals ");
-              reply += ExtraTaskSettings.TaskDeviceValueNames[varNr];
-              reply += F(":<TD><input type='text' name='taskdevicevaluedecimals");
-              reply += varNr + 1;
-              reply += F("' value='");
-              reply += ExtraTaskSettings.TaskDeviceValueDecimals[varNr];
-              reply += F("'>");
-            }
+          reply += F("<TH>Decimals");
         }
 
+        //table body
         for (byte varNr = 0; varNr < Device[DeviceIndex].ValueCount; varNr++)
         {
-          reply += F("<TR><TD>Value Name ");
+          reply += F("<TR><TD>");
           reply += varNr + 1;
-          reply += F(":<TD><input type='text' maxlength='40' name='taskdevicevaluename");
-          reply += varNr + 1;
-          reply += F("' value='");
-          reply += ExtraTaskSettings.TaskDeviceValueNames[varNr];
-          reply += F("'>");
+          reply += F("<TD>");
+          String id = F("TDVN");   //="taskdevicevaluename"
+          id += (varNr + 1);
+          addTextBox(reply, id, ExtraTaskSettings.TaskDeviceValueNames[varNr], 40);
+
+          if (Device[DeviceIndex].FormulaOption)
+          {
+            reply += F("<TD>");
+            String id = F("TDF");   //="taskdeviceformula"
+            id += (varNr + 1);
+            addTextBox(reply, id, ExtraTaskSettings.TaskDeviceFormula[varNr], 40);
+          }
+
+          if (Device[DeviceIndex].FormulaOption || Device[DeviceIndex].DecimalsOnly)
+          {
+            reply += F("<TD>");
+            String id = F("TDVD");   //="taskdevicevaluedecimals"
+            id += (varNr + 1);
+            addNumericBox(reply, id, ExtraTaskSettings.TaskDeviceValueDecimals[varNr], 0, 6);
+          }
         }
       }
-
     }
-    reply += F("<TR><TD><TD><a class=\"button-link\" href=\"devices?setpage=");
+
+    addFormSeparator(reply);
+
+    reply += F("<TR><TD><TD><a class='button link' href=\"devices?setpage=");
     reply += page;
     reply += F("\">Close</a>");
-    reply += F("<input class=\"button-link\" type='submit' value='Submit'>");
+    addSubmitButton(reply);
     reply += F("<input type='hidden' name='edit' value='1'>");
     reply += F("<input type='hidden' name='page' value='1'>");
     reply += F("</table></form>");
   }
 
   addFooter(reply);
-  checkRAM(9);
+  checkRAM(F("handle_devices"));
   String log = F("DEBUG: String size:");
   log += reply.length();
   addLog(LOG_LEVEL_DEBUG_MORE, log);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -1491,27 +1730,32 @@ void addDeviceSelect(String& str, String name,  int choice)
 
   String deviceName;
 
-  str += F("<select name='");
-  str += name;
-  //str += "'>";
-  str += "' LANGUAGE=javascript onchange=\"return dept_onchange(frmselect)\">";
-
-  str += F("<option value='0'></option>");
+  addSelector_Head(str, name, true);
+  addSelector_Item(str, F("- None -"), 0, false, false, F(""));
   for (byte x = 0; x <= deviceCount; x++)
   {
     byte index = sortedIndex[x];
     if (Plugin_id[index] != 0)
       Plugin_ptr[index](PLUGIN_GET_DEVICENAME, 0, deviceName);
-    str += F("<option value='");
-    str += Device[index].Number;
-    str += "'";
-    if (choice == Device[index].Number)
-      str += F(" selected");
-    str += ">";
-    str += deviceName;
-    str += F("</option>");
+
+#ifdef PLUGIN_BUILD_DEV
+    int num = index + 1;
+    String plugin = F("P");
+    if (num < 10) plugin += F("0");
+    if (num < 100) plugin += F("0");
+    plugin += num;
+    plugin += F(" - ");
+    deviceName = plugin + deviceName;
+#endif
+
+    addSelector_Item(str,
+                     deviceName,
+                     Device[index].Number,
+                     choice == Device[index].Number,
+                     false,
+                     F(""));
   }
-  str += F("</select>");
+  addSelector_Foot(str);
 }
 
 
@@ -1596,6 +1840,20 @@ void sortDeviceArray()
 }
 
 
+void addFormPinSelect(String& str, const String& label, const String& id, int choice)
+{
+  addRowLabel(str, label);
+  addPinSelect(false, str, id, choice);
+}
+
+
+void addFormPinSelectI2C(String& str, const String& label, const String& id, int choice)
+{
+  addRowLabel(str, label);
+  addPinSelect(true, str, id, choice);
+}
+
+
 //********************************************************************************
 // Add a GPIO pin select dropdown list for both 8266 and 8285
 //********************************************************************************
@@ -1608,7 +1866,7 @@ void sortDeviceArray()
 void addPinSelect(boolean forI2C, String& str, String name,  int choice)
 {
   String options[18];
-  options[0] = F(" ");
+  options[0] = F("- None -");
   options[1] = F("GPIO-0 (D3)");
   options[2] = F("GPIO-1 (D10)");
   options[3] = F("GPIO-2 (D4)");
@@ -1658,14 +1916,14 @@ void addPinSelect(boolean forI2C, String& str, String name,  int choice)
 void addPinSelect(boolean forI2C, String& str, String name,  int choice)
 {
   String options[14];
-  options[0] = F(" ");
+  options[0] = F("- None -");
   options[1] = F("GPIO-0 (D3)");
   options[2] = F("GPIO-1 (D10)");
   options[3] = F("GPIO-2 (D4)");
   options[4] = F("GPIO-3 (D9)");
   options[5] = F("GPIO-4 (D2)");
   options[6] = F("GPIO-5 (D1)");
-  options[7] = F("GPIO-9 (D11)");
+  options[7] = F("GPIO-9 (D11) " HTML_SYMBOL_WARNING);
   options[8] = F("GPIO-10 (D12)");
   options[9] = F("GPIO-12 (D6)");
   options[10] = F("GPIO-13 (D7)");
@@ -1696,30 +1954,337 @@ void addPinSelect(boolean forI2C, String& str, String name,  int choice)
 // Helper function actually rendering dropdown list for addPinSelect()
 //********************************************************************************
 void renderHTMLForPinSelect(String options[], int optionValues[], boolean forI2C, String& str, String name,  int choice, int count) {
-    str += F("<select name='");
-    str += name;
-    str += "'>";
-    for (byte x = 0; x < count; x++)
-    {
-      str += F("<option value='");
-      str += optionValues[x];
-      str += "'";
-      if (optionValues[x] != -1) // empty selection can never be disabled...
-      {
-        if (!forI2C && ((optionValues[x] == Settings.Pin_i2c_sda) || (optionValues[x] == Settings.Pin_i2c_scl)))
-          str += F(" disabled");
-        if (Settings.UseSerial && ((optionValues[x] == 1) || (optionValues[x] == 3)))
-          str += F(" disabled");
-      }
-      if (choice == optionValues[x])
-        str += F(" selected");
-      str += ">";
-      str += options[x];
-      str += F("</option>");
-    }
-    str += F("</select>");
+  addSelector_Head(str, name, false);
+  for (byte x = 0; x < count; x++)
+  {
+    boolean disabled = false;
 
+    if (optionValues[x] != -1) // empty selection can never be disabled...
+    {
+      if (!forI2C && ((optionValues[x] == Settings.Pin_i2c_sda) || (optionValues[x] == Settings.Pin_i2c_scl)))
+        disabled = true;
+      if (Settings.UseSerial && ((optionValues[x] == 1) || (optionValues[x] == 3)))
+        disabled = true;
+    }
+    addSelector_Item(str,
+                     options[x],
+                     optionValues[x],
+                     choice == optionValues[x],
+                     disabled,
+                     F(""));
+  }
+  addSelector_Foot(str);
 }
+
+
+void addFormSelectorI2C(String& str, const String& id, int addressCount, const int addresses[], int selectedIndex)
+{
+  String options[addressCount];
+  for (byte x = 0; x < addressCount; x++)
+  {
+    options[x] = F("0x");
+    options[x] += String(addresses[x], HEX);
+    if (x == 0)
+      options[x] += F(" - (default)");
+  }
+  addFormSelector(str, F("I2C Address"), id, addressCount, options, addresses, NULL, selectedIndex, false);
+}
+
+void addFormSelector(String& str, const String& label, const String& id, int optionCount, const String options[], const int indices[], int selectedIndex)
+{
+  addFormSelector(str, label, id, optionCount, options, indices, NULL, selectedIndex, false);
+}
+
+void addFormSelector(String& str, const String& label, const String& id, int optionCount, const String options[], const int indices[], const String attr[], int selectedIndex, boolean reloadonchange)
+{
+  addRowLabel(str, label);
+  addSelector(str, id, optionCount, options, indices, attr, selectedIndex, reloadonchange);
+}
+
+void addSelector(String& str, const String& id, int optionCount, const String options[], const int indices[], const String attr[], int selectedIndex, boolean reloadonchange)
+{
+  int index;
+
+  str += F("<select name='");
+  str += id;
+  str += F("'");
+  if (reloadonchange)
+    str += F(" onchange=\"return dept_onchange(frmselect)\"");
+  str += F(">");
+  for (byte x = 0; x < optionCount; x++)
+  {
+    if (indices)
+      index = indices[x];
+    else
+      index = x;
+    str += F("<option value=");
+    str += index;
+    if (selectedIndex == index)
+      str += F(" selected");
+    if (attr)
+    {
+      str += F(" ");
+      str += attr[x];
+    }
+    str += ">";
+    str += options[x];
+    str += F("</option>");
+  }
+  str += F("</select>");
+}
+
+
+void addSelector_Head(String& str, const String& id, boolean reloadonchange)
+{
+  str += F("<select name='");
+  str += id;
+  str += F("'");
+  if (reloadonchange)
+    str += F(" onchange=\"return dept_onchange(frmselect)\"");
+  str += F(">");
+}
+
+void addSelector_Item(String& str, const String& option, int index, boolean selected, boolean disabled, const String& attr)
+{
+  str += F("<option value=");
+  str += index;
+  if (selected)
+    str += F(" selected");
+  if (disabled)
+    str += F(" disabled");
+  if (attr && attr.length() > 0)
+  {
+    str += F(" ");
+    str += attr;
+  }
+  str += ">";
+  str += option;
+  str += F("</option>");
+}
+
+
+void addSelector_Foot(String& str)
+{
+  str += F("</select>");
+}
+
+
+void addUnit(String& str, const String& unit)
+{
+  str += F(" [");
+  str += unit;
+  str += F("]");
+}
+
+
+void addRowLabel(String& str, const String& label)
+{
+  str += F("<TR><TD>");
+  str += label;
+  str += F(":<TD>");
+}
+
+void addButton(String& str, const String &url, const String &label)
+{
+  str += F("<a class='button link' href='");
+  str += url;
+  str += F("'>");
+  str += label;
+  str += F("</a>");
+}
+
+void addSubmitButton(String& str)
+{
+  str += F("<input class='button link' type='submit' value='Submit'>");
+}
+
+//********************************************************************************
+// Add a header
+//********************************************************************************
+void addFormHeader(String& str, const String& header1, const String& header2)
+{
+  str += F("<TR><TH>");
+  str += header1;
+  str += F("<TH>");
+  str += header2;
+  str += F("");
+}
+
+void addFormHeader(String& str, const String& header)
+{
+  str += F("<TR><TD colspan='2'><h2>");
+  str += header;
+  str += F("</h2>");
+}
+
+
+//********************************************************************************
+// Add a sub header
+//********************************************************************************
+void addFormSubHeader(String& str, const String& header)
+{
+  str += F("<TR><TD colspan='2'><h3>");
+  str += header;
+  str += F("</h3>");
+}
+
+
+//********************************************************************************
+// Add a note as row start
+//********************************************************************************
+void addFormNote(String& str, const String& text)
+{
+  str += F("<TR><TD><TD><div class='note'>Note: ");
+  str += text;
+  str += F("</div>");
+}
+
+
+//********************************************************************************
+// Add a separator as row start
+//********************************************************************************
+void addFormSeparator(String& str)
+{
+  str += F("<TR><TD colspan='2'><hr>");
+}
+
+
+//********************************************************************************
+// Add a checkbox
+//********************************************************************************
+void addCheckBox(String& str, const String& id, boolean checked)
+{
+  str += F("<input type=checkbox id='");
+  str += id;
+  str += F("' name='");
+  str += id;
+  str += F("'");
+  if (checked)
+    str += F(" checked");
+  str += F(">");
+}
+
+void addFormCheckBox(String& str, const String& label, const String& id, boolean checked)
+{
+  addRowLabel(str, label);
+  addCheckBox(str, id, checked);
+}
+
+
+//********************************************************************************
+// Add a numeric box
+//********************************************************************************
+void addNumericBox(String& str, const String& id, int value, int min, int max)
+{
+  str += F("<input type='number' name='");
+  str += id;
+  str += F("'");
+  if (min != INT_MIN)
+  {
+    str += F(" min=");
+    str += min;
+  }
+  if (max != INT_MAX)
+  {
+    str += F(" max=");
+    str += max;
+  }
+  str += F(" style='width:5em;' value=");
+  str += value;
+  str += F(">");
+}
+
+void addNumericBox(String& str, const String& id, int value)
+{
+  addNumericBox(str, id, value, INT_MIN, INT_MAX);
+}
+
+void addFormNumericBox(String& str, const String& label, const String& id, int value, int min, int max)
+{
+  addRowLabel(str,  label);
+  addNumericBox(str, id, value, min, max);
+}
+
+void addFormNumericBox(String& str, const String& label, const String& id, int value)
+{
+  addFormNumericBox(str, label, id, value, INT_MIN, INT_MAX);
+}
+
+
+
+void addTextBox(String& str, const String& id, const String&  value, int maxlength)
+{
+  str += F("<input type='text' name='");
+  str += id;
+  str += F("' maxlength=");
+  str += maxlength;
+  str += F(" value='");
+  str += value;
+  str += F("'>");
+}
+
+void addFormTextBox(String& str, const String& label, const String& id, const String&  value, int maxlength)
+{
+  addRowLabel(str, label);
+  addTextBox(str, id, value, maxlength);
+}
+
+
+void addFormPasswordBox(String& str, const String& label, const String& id, const String& password, int maxlength)
+{
+  addRowLabel(str, label);
+  str += F("<input type='password' name='");
+  str += id;
+  str += F("' maxlength=");
+  str += maxlength;
+  str += F(" value='");
+  if (password != F(""))   //no password?
+    str += F("*****");
+  //str += password;   //password will not published over HTTP
+  str += F("'>");
+}
+
+void copyFormPassword(const String& id, char* pPassword, int maxlength)
+{
+  String password = WebServer.arg(id);
+  if (password == F("*****"))   //no change?
+    return;
+  strncpy(pPassword, password.c_str(), maxlength);
+}
+
+void addFormIPBox(String& str, const String& label, const String& id, const byte ip[4])
+{
+  char strip[20];
+  if (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0)
+    strip[0] = 0;
+  else
+    sprintf_P(strip, PSTR("%u.%u.%u.%u"), ip[0], ip[1], ip[2], ip[3]);
+
+  addRowLabel(str, label);
+  str += F("<input type='text' name='");
+  str += id;
+  str += F("' value='");
+  str += strip;
+  str += F("'>");
+}
+
+// adds a Help Button with points to the the given Wiki Subpage
+void addHelpButton(String& str, const String& url)
+{
+  str += F(" <a class=\"button help\" href=\"http://www.letscontrolit.com/wiki/index.php/");
+  str += url;
+  str += F("\" target=\"_blank\">&#10068;</a>");
+}
+
+
+void addEnabled(String& str, boolean enabled)
+{
+  if (enabled)
+    str += F("<span class='enabled on'>&#10004;</span>");
+  else
+    str += F("<span class='enabled off'>&#10008;</span>");
+}
+
 
 //********************************************************************************
 // Add a task select dropdown list
@@ -1731,7 +2296,7 @@ void addTaskSelect(String& str, String name,  int choice)
 
   str += F("<select name='");
   str += name;
-  str += F("' LANGUAGE=javascript onchange=\"return dept_onchange(frmselect)\">");
+  str += F("' onchange=\"return dept_onchange(frmselect)\">");
 
   for (byte x = 0; x < TASKS_MAX; x++)
   {
@@ -1759,6 +2324,29 @@ void addTaskSelect(String& str, String name,  int choice)
     str += ExtraTaskSettings.TaskDeviceName;
     str += "</option>";
   }
+}
+
+
+bool isFormItemChecked(const String& id)
+{
+  return WebServer.arg(id) == "on";
+}
+
+int getFormItemInt(const String& id)
+{
+  String val = WebServer.arg(id);
+  return val.toInt();
+}
+
+float getFormItemFloat(const String& id)
+{
+  String val = WebServer.arg(id);
+  return val.toFloat();
+}
+
+bool isFormItem(const String& id)
+{
+  return (WebServer.arg(id).length() != 0);
 }
 
 
@@ -1793,12 +2381,13 @@ void addTaskValueSelect(String& str, String name,  int choice, byte TaskIndex)
 void handle_log() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   char *TempString = (char*)malloc(80);
 
   String reply = "";
   addHeader(true, reply);
-  reply += F("<script language='JavaScript'>function RefreshMe(){window.location = window.location}setTimeout('RefreshMe()', 3000);</script>");
-  reply += F("<table><TH>Log<TR><TD>");
+  reply += F("<script>function RefreshMe(){window.location = window.location}setTimeout('RefreshMe()', 3000);</script>");
+  reply += F("<table><TR><TH>Log<TR><TD>");
 
   if (logcount != -1)
   {
@@ -1819,7 +2408,7 @@ void handle_log() {
   }
   reply += F("</table>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   free(TempString);
 }
 
@@ -1830,35 +2419,116 @@ void handle_log() {
 void handle_tools() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   String webrequest = WebServer.arg(F("cmd"));
 
   String reply = "";
   addHeader(true, reply);
 
+
   reply += F("<form>");
-  reply += F("<table><TH>Tools<TH>");
-  reply += F("<TR><TD>System<TD><a class=\"button-link\" href=\"/?cmd=reboot\">Reboot</a>");
-  reply += F("<a class=\"button-link\" href=\"log\">Log</a>");
-  reply += F("<a class=\"button-link\" href=\"sysinfo\">Info</a>");
-  reply += F("<a class=\"button-link\" href=\"advanced\">Advanced</a><BR><BR>");
-  reply += F("<TR><TD>Wifi<TD><a class=\"button-link\" href=\"/?cmd=wificonnect\">Connect</a>");
-  reply += F("<a class=\"button-link\" href=\"/?cmd=wifidisconnect\">Disconnect</a>");
-  reply += F("<a class=\"button-link\" href=\"/wifiscanner\">Scan</a><BR><BR>");
-  reply += F("<TR><TD>Interfaces<TD><a class=\"button-link\" href=\"/i2cscanner\">I2C Scan</a><BR><BR>");
-  reply += F("<TR><TD>Settings<TD><a class=\"button-link\" href=\"/upload\">Load</a>");
-  reply += F("<a class=\"button-link\" href=\"/download\">Save</a> (If you change filename, load will not work!!)");
+  reply += F("<table>");
+
+  addFormHeader(reply, F("Tools"));
+
+  addFormSubHeader(reply, F("System"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("/?cmd=reboot"), F("Reboot"));
+  reply += F("<TD>");
+  reply += F("Reboots ESP");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("log"), F("Log"));
+  reply += F("<TD>");
+  reply += F("Open log output");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("sysinfo"), F("Info"));
+  reply += F("<TD>");
+  reply += F("Open system info page");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("advanced"), F("Advanced"));
+  reply += F("<TD>");
+  reply += F("Open advanced settings");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("json"), F("Show JSON"));
+  reply += F("<TD>");
+  reply += F("Open JSON output");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("pinstates"), F("Pin state buffer"));
+  reply += F("<TD>");
+  reply += F("Show Pin state buffer");
+
+  addFormSubHeader(reply, F("Wifi"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("/?cmd=wificonnect"), F("Connect"));
+  reply += F("<TD>");
+  reply += F("Connects to known Wifi network");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("/?cmd=wifidisconnect"), F("Disconnect"));
+  reply += F("<TD>");
+  reply += F("Disconnect from wifi network");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("wifiscanner"), F("Scan"));
+  reply += F("<TD>");
+  reply += F("Scan for wifi networks");
+
+  addFormSubHeader(reply, F("Interfaces"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("i2cscanner"), F("I2C Scan"));
+  reply += F("<TD>");
+  reply += F("Scan for I2C devices");
+
+  addFormSubHeader(reply, F("Settings"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("upload"), F("Load"));
+  reply += F("<TD>");
+  reply += F("Loads a settings file");
+  addFormNote(reply, F("(File MUST be renamed to \"config.dat\" before upload!)"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("download"), F("Save"));
+  reply += F("<TD>");
+  reply += F("Saves a settings file");
+
   if (ESP.getFlashChipRealSize() > 524288)
   {
-    reply += F("<TR><TD>Firmware<TD><a class=\"button-link\" href=\"/update\">Load</a>");
-    reply += F("<a class=\"button-link\" href=\"http://www.letscontrolit.com/wiki/index.php/EasyOTA\" target=\"_blank\">?</a>");
+    addFormSubHeader(reply, F("Firmware"));
+    reply += F("<TR><TD HEIGHT=\"30\">");
+    addButton(reply, F("update"), F("Load"));
+    addHelpButton(reply, F("EasyOTA"));
+    reply += F("<TD>");
+    reply += F("Load a new firmware");
   }
-  reply += F("<TR><TD>Filesystem<TD><a class=\"button-link\" href=\"/filelist\">Flash</a>");
-  reply += F("<a class=\"button-link\" href=\"/SDfilelist\">SD Card</a><BR><BR>");
 
-  reply += F("<TR><TD>Command<TD>");
+  addFormSubHeader(reply, F("Filesystem"));
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("filelist"), F("Flash"));
+  reply += F("<TD>");
+  reply += F("Show files on internal flash");
+
+  reply += F("<TR><TD HEIGHT=\"30\">");
+  addButton(reply, F("SDfilelist"), F("SD Card"));
+  reply += F("<TD>");
+  reply += F("Show files on SD-Card");
+
+  addFormSubHeader(reply, F("Command"));
+  reply += F("<TR><TD HEIGHT=\"30\">");
   reply += F("<input type='text' name='cmd' value='");
   reply += webrequest;
-  reply += F("'><TR><TD><TD><input class=\"button-link\" type='submit' value='Submit'><TR><TD>");
+  reply += F("'><TD>");
+  addSubmitButton(reply);
+  reply += F("<TR><TD>");
 
   printToWeb = true;
   printWebString = "";
@@ -1880,9 +2550,61 @@ void handle_tools() {
   }
   reply += F("</table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   printWebString = "";
   printToWeb = false;
+}
+
+
+//********************************************************************************
+// Web Interface pin state list
+//********************************************************************************
+void handle_pinstates() {
+  if (!isLoggedIn()) return;
+
+  navMenuIndex = 7;
+
+
+  String reply = "";
+  addHeader(true, reply);
+  addFormHeader(reply, F("Pin state table"));
+
+  reply += F("<table border=1px frame='box' rules='all'><TH>Plugin<TH>Index/Pin<TH>Mode<TH>Value/State");
+
+  for (byte x = 0; x < PINSTATE_TABLE_MAX; x++)
+    if ( pinStates[x].plugin != 0)
+    {
+      reply += F("<TR><TD>");
+      reply += pinStates[x].plugin;
+      reply += F("<TD>");
+      reply += pinStates[x].index;
+      reply += F("<TD>");
+      byte mode = pinStates[x].mode;
+      switch (mode)
+      {
+        case PIN_MODE_UNDEFINED:
+          reply += F("undefined");
+          break;
+        case PIN_MODE_INPUT:
+          reply += F("input");
+          break;
+        case PIN_MODE_OUTPUT:
+          reply += F("output");
+          break;
+        case PIN_MODE_PWM:
+          reply += F("PWM");
+          break;
+        case PIN_MODE_SERVO:
+          reply += F("servo");
+          break;
+      }
+      reply += F("<TD>");
+      reply += pinStates[x].value;
+    }
+
+  reply += F("</table>");
+  addFooter(reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -1892,11 +2614,12 @@ void handle_tools() {
 void handle_i2cscanner() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   char *TempString = (char*)malloc(80);
 
   String reply = "";
   addHeader(true, reply);
-  reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH>I2C Addresses in use<TH>Supported devices");
+  reply += F("<table border=1px frame='box' rules='all'><TH>I2C Addresses in use<TH>Supported devices");
 
   byte error, address;
   int nDevices;
@@ -1937,51 +2660,70 @@ void handle_i2cscanner() {
           reply += F("PCF8574A");
           break;
         case 0x39:
-          reply += F("PCF8574A<BR>TSL2561");
+          reply += F("PCF8574A<BR>TSL2561<BR>APDS9960");
           break;
         case 0x3C:
         case 0x3D:
           reply += F("PCF8574A<BR>OLED");
           break;
         case 0x40:
-          reply += F("SI7021<BR>INA219<BR>PCA9685");
+          reply += F("SI7021<BR>HTU21D<BR>INA219<BR>PCA9685");
           break;
         case 0x41:
         case 0x42:
         case 0x43:
           reply += F("INA219");
           break;
+        case 0x44:
+        case 0x45:
+          reply += F("SHT30/31/35");
+          break;
         case 0x48:
         case 0x4A:
         case 0x4B:
-          reply += F("PCF8591<BR>ADS1115");
+          reply += F("PCF8591<BR>ADS1115<BR>LM75A");
           break;
         case 0x49:
-          reply += F("PCF8591<BR>ADS1115<BR>TSL2561");
+          reply += F("PCF8591<BR>ADS1115<BR>TSL2561<BR>LM75A");
           break;
         case 0x4C:
-        case 0x4D:
         case 0x4E:
         case 0x4F:
-          reply += F("PCF8591");
+          reply += F("PCF8591<BR>LM75A");
+          break;
+        case 0x4D:
+          reply += F("PCF8591<BR>MCP3221<BR>LM75A");
           break;
         case 0x5A:
-          reply += F("MLX90614");
+          reply += F("MLX90614<BR>MPR121");
+          break;
+        case 0x5B:
+          reply += F("MPR121");
           break;
         case 0x5C:
-          reply += F("DHT12<BR>BH1750");
+          reply += F("DHT12<BR>AM2320<BR>BH1750<BR>MPR121");
+          break;
+        case 0x5D:
+          reply += F("MPR121");
           break;
         case 0x60:
-          reply += F("Adafruit Motorshield v2");
+          reply += F("Adafruit Motorshield v2<BR>SI1145");
           break;
         case 0x70:
-          reply += F("Adafruit Motorshield v2 (Catchall)");
+          reply += F("Adafruit Motorshield v2 (Catchall)<BR>HT16K33");
+          break;
+        case 0x71:
+        case 0x72:
+        case 0x73:
+        case 0x74:
+        case 0x75:
+          reply += F("HT16K33");
           break;
         case 0x76:
-          reply += F("BME280<BR>BMP280<BR>MS5607<BR>MS5611");
+          reply += F("BME280<BR>BMP280<BR>MS5607<BR>MS5611<BR>HT16K33");
           break;
         case 0x77:
-          reply += F("BMP085<BR>BMP180<BR>BME280<BR>BMP280<BR>MS5607<BR>MS5611");
+          reply += F("BMP085<BR>BMP180<BR>BME280<BR>BMP280<BR>MS5607<BR>MS5611<BR>HT16K33");
           break;
         case 0x7f:
           reply += F("Arduino PME");
@@ -2001,7 +2743,7 @@ void handle_i2cscanner() {
 
   reply += F("</table>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   free(TempString);
 }
 
@@ -2012,11 +2754,12 @@ void handle_i2cscanner() {
 void handle_wifiscanner() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   char *TempString = (char*)malloc(80);
 
   String reply = "";
   addHeader(true, reply);
-  reply += F("<table><TH>Access Points:<TH>RSSI");
+  reply += F("<table><TR><TH>Access Points:<TH>RSSI");
 
   int n = WiFi.scanNetworks();
   if (n == 0)
@@ -2035,7 +2778,7 @@ void handle_wifiscanner() {
 
   reply += F("</table>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   free(TempString);
 }
 
@@ -2055,7 +2798,9 @@ void handle_login() {
   reply += F("<table><TR><TD>Password<TD>");
   reply += F("<input type='password' name='password' value='");
   reply += webrequest;
-  reply += F("'><TR><TD><TD><input class=\"button-link\" type='submit' value='Submit'><TR><TD>");
+  reply += F("'><TR><TD><TD>");
+  addSubmitButton(reply);
+  reply += F("<TR><TD>");
   reply += F("</table></form>");
 
   if (webrequest.length() != 0)
@@ -2065,7 +2810,7 @@ void handle_login() {
     {
       WebLoggedIn = true;
       WebLoggedInTimer = 0;
-      reply = F("<script language='JavaScript'>window.location = '.'</script>");
+      reply = F("<script>window.location = '.'</script>");
     }
     else
     {
@@ -2073,7 +2818,7 @@ void handle_login() {
     }
   }
 
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplMsg"), reply);
   printWebString = "";
   printToWeb = false;
 }
@@ -2204,6 +2949,7 @@ boolean handle_json()
 void handle_advanced() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   char tmpString[81];
 
   String messagedelay = WebServer.arg(F("messagedelay"));
@@ -2247,6 +2993,7 @@ void handle_advanced() {
     Settings.SerialLogLevel = serialloglevel.toInt();
     Settings.WebLogLevel = webloglevel.toInt();
     Settings.SDLogLevel = sdloglevel.toInt();
+    Settings.UseValueLogger = isFormItemChecked(F("valuelogger"));
     Settings.BaudRate = baudrate.toInt();
     Settings.UseNTP = (usentp == "on");
     Settings.DST = (dst == "on");
@@ -2266,108 +3013,72 @@ void handle_advanced() {
   char str[20];
 
   reply += F("<form  method='post'><table>");
-  reply += F("<TH>Advanced Settings<TH>Value");
 
-  reply += F("<TR><TD>MQTT Retain Msg:<TD>");
-  if (Settings.MQTTRetainFlag)
-    reply += F("<input type=checkbox name='mqttretainflag' checked>");
-  else
-    reply += F("<input type=checkbox name='mqttretainflag'>");
+  addFormHeader(reply, F("Advanced Settings"));
 
-  reply += F("<TR><TD>Message Delay (ms):<TD><input type='text' name='messagedelay' value='");
-  reply += Settings.MessageDelay;
+  addFormCheckBox(reply, F("Rules"), F("userules"), Settings.UseRules);
 
-  reply += F("'><TR><TD>Fixed IP Octet:<TD><input type='text' name='ip' value='");
-  reply += Settings.IP_Octet;
-  reply += F("'>");
+  addFormSubHeader(reply, F("Controller Settings"));
 
-  reply += F("<TR><TD>Use NTP:<TD>");
-  if (Settings.UseNTP)
-    reply += F("<input type=checkbox name='usentp' checked>");
-  else
-    reply += F("<input type=checkbox name='usentp'>");
+  addFormCheckBox(reply, F("MQTT Retain Msg"), F("mqttretainflag"), Settings.MQTTRetainFlag);
+  addFormNumericBox(reply, F("Message Delay"), F("messagedelay"), Settings.MessageDelay, 0, INT_MAX);
+  addUnit(reply, F("ms"));
 
-  reply += F("<TR><TD>NTP Hostname:<TD><input type='text' name='ntphost' size=64 value='");
-  reply += Settings.NTPHost;
+  addFormSubHeader(reply, F("NTP Settings"));
 
-  reply += F("'><TR><TD>Timezone Offset: (Minutes)<TD><input type='text' name='timezone' size=2 value='");
-  reply += Settings.TimeZone;
-  reply += F("'>");
+  addFormCheckBox(reply, F("Use NTP"), F("usentp"), Settings.UseNTP);
+  addFormTextBox(reply, F("NTP Hostname"), F("ntphost"), Settings.NTPHost, 63);
+  addFormNumericBox(reply, F("Timezone Offset"), F("timezone"), Settings.TimeZone, -43200, 43200);   // +/-12h
+  addUnit(reply, F("minutes"));
+  addFormCheckBox(reply, F("DST"), F("dst"), Settings.DST);
 
-  reply += F("<TR><TD>DST:<TD>");
-  if (Settings.DST)
-    reply += F("<input type=checkbox name='dst' checked>");
-  else
-    reply += F("<input type=checkbox name='dst'>");
 
-  reply += F("<TR><TD>Syslog IP:<TD><input type='text' name='syslogip' value='");
-  str[0] = 0;
-  sprintf_P(str, PSTR("%u.%u.%u.%u"), Settings.Syslog_IP[0], Settings.Syslog_IP[1], Settings.Syslog_IP[2], Settings.Syslog_IP[3]);
-  reply += str;
+  addFormSubHeader(reply, F("Log Settings"));
 
-  reply += F("'><TR><TD>Syslog Level:<TD><input type='text' name='sysloglevel' value='");
-  reply += Settings.SyslogLevel;
+  addFormIPBox(reply, F("Syslog IP"), F("syslogip"), Settings.Syslog_IP);
+  addFormNumericBox(reply, F("Syslog Level"), F("sysloglevel"), Settings.SyslogLevel, 0, 4);
 
-  reply += F("'><TR><TD>UDP port:<TD><input type='text' name='udpport' value='");
-  reply += Settings.UDPPort;
-  reply += F("'>");
+  addFormNumericBox(reply, F("Serial log Level"), F("serialloglevel"), Settings.SerialLogLevel, 0, 4);
+  addFormNumericBox(reply, F("Web log Level"), F("webloglevel"), Settings.WebLogLevel, 0, 4);
+  addFormNumericBox(reply, F("SD Card log Level"), F("sdloglevel"), Settings.SDLogLevel, 0, 4);
 
-  reply += F("<TR><TD>Enable Serial port:<TD>");
-  if (Settings.UseSerial)
-    reply += F("<input type=checkbox name='useserial' checked>");
-  else
-    reply += F("<input type=checkbox name='useserial'>");
+  addFormCheckBox(reply, F("SD Card Value Logger"), F("valuelogger"), Settings.UseValueLogger);
 
-  reply += F("<TR><TD>Serial log Level:<TD><input type='text' name='serialloglevel' value='");
-  reply += Settings.SerialLogLevel;
 
-  reply += F("'><TR><TD>Web log Level:<TD><input type='text' name='webloglevel' value='");
-  reply += Settings.WebLogLevel;
+  addFormSubHeader(reply, F("Serial Settings"));
 
-  reply += F("'><TR><TD>SD Card log Level:<TD><input type='text' name='sdloglevel' value='");
-  reply += Settings.SDLogLevel;
+  addFormCheckBox(reply, F("Enable Serial port"), F("useserial"), Settings.UseSerial);
+  addFormNumericBox(reply, F("Baud Rate"), F("baudrate"), Settings.BaudRate, 0, 1000000);
 
-  reply += F("'><TR><TD>Baud Rate:<TD><input type='text' name='baudrate' value='");
-  reply += Settings.BaudRate;
-  reply += F("'>");
 
-  reply += F("<TR><TD>WD I2C Address:<TD><input type='text' name='wdi2caddress' value='");
-  reply += Settings.WDI2CAddress;
-  reply += F("'>");
+  addFormSubHeader(reply, F("Inter-ESPEasy Network (experimental)"));
 
-  reply += F("<TR><TD>Use SSDP:<TD>");
-  if (Settings.UseSSDP)
-    reply += F("<input type=checkbox name='usessdp' checked>");
-  else
-    reply += F("<input type=checkbox name='usessdp'>");
+  addFormCheckBox(reply, F("Global Sync"), F("globalsync"), Settings.GlobalSync);
+  addFormNumericBox(reply, F("UDP port"), F("udpport"), Settings.UDPPort, 0, 65535);
 
-  reply += F("<TR><TD>Connection Failure Threshold:<TD><input type='text' name='cft' value='");
-  reply += Settings.ConnectionFailuresThreshold;
-  reply += F("'>");
 
-  reply += F("<TR><TD>Rules:<TD>");
-  if (Settings.UseRules)
-    reply += F("<input type=checkbox name='userules' checked>");
-  else
-    reply += F("<input type=checkbox name='userules'>");
+  //TODO sort settings in groups or move to other pages/groups
+  addFormSubHeader(reply, F("Special and Experimental Settings"));
 
-  reply += F("<TR><TH>Experimental Settings<TH>Value");
+  addFormNumericBox(reply, F("Fixed IP Octet"), F("ip"), Settings.IP_Octet, 0, 255);
 
-  reply += F("<TR><TD>I2C ClockStretchLimit:<TD><input type='text' name='wireclockstretchlimit' value='");
-  reply += Settings.WireClockStretchLimit;
-  reply += F("'>");
+  addFormNumericBox(reply, F("WD I2C Address"), F("wdi2caddress"), Settings.WDI2CAddress, 0, 127);
+  reply += F(" (decimal)");
 
-  reply += F("<TR><TD>Global Sync:<TD>");
-  if (Settings.GlobalSync)
-    reply += F("<input type=checkbox name='globalsync' checked>");
-  else
-    reply += F("<input type=checkbox name='globalsync'>");
+  addFormCheckBox(reply, F("Use SSDP"), F("usessdp"), Settings.UseSSDP);
 
-  reply += F("<TR><TD><TD><input class=\"button-link\" type='submit' value='Submit'>");
+  addFormNumericBox(reply, F("Connection Failure Threshold"), F("cft"), Settings.ConnectionFailuresThreshold, 0, 100);
+
+  addFormNumericBox(reply, F("I2C ClockStretchLimit"), F("wireclockstretchlimit"), Settings.WireClockStretchLimit);   //TODO define limits
+
+  addFormSeparator(reply);
+
+  reply += F("<TR><TD><TD>");
+  addSubmitButton(reply);
   reply += F("<input type='hidden' name='edit' value='1'>");
   reply += F("</table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -2399,11 +3110,25 @@ void handle_download()
 {
   if (!isLoggedIn()) return;
 
-  fs::File dataFile = SPIFFS.open("config.dat", "r");
+  navMenuIndex = 7;
+  fs::File dataFile = SPIFFS.open(F("config.dat"), "r");
   if (!dataFile)
     return;
 
-  WebServer.sendHeader("Content-Disposition", "attachment; filename=config.dat");
+  String str = F("attachment; filename=config_");
+  str += Settings.Name;
+  str += "_U";
+  str += Settings.Unit;
+  str += F("_Build");
+  str += BUILD;
+  str += F("_");
+  if (Settings.UseNTP)
+  {
+    str += getDateTimeString('\0', '\0', '\0');
+  }
+  str += (".dat");
+
+  WebServer.sendHeader("Content-Disposition", str);
   WebServer.streamFile(dataFile, "application/octet-stream");
 }
 
@@ -2418,9 +3143,10 @@ void handle_upload() {
   String reply = "";
   addHeader(true, reply);
 
-  reply += F("<form enctype=\"multipart/form-data\" method=\"post\"><p>Upload settings file:<br><input type=\"file\" name=\"datafile\" size=\"40\"></p><div><input class=\"button-link\" type='submit' value='Upload'></div><input type='hidden' name='edit' value='1'></form>");
+  navMenuIndex = 7;
+  reply += F("<form enctype=\"multipart/form-data\" method=\"post\"><p>Upload settings file:<br><input type=\"file\" name=\"datafile\" size=\"40\"></p><div><input class='button link' type='submit' value='Upload'></div><input type='hidden' name='edit' value='1'></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   printWebString = "";
   printToWeb = false;
 }
@@ -2432,6 +3158,7 @@ void handle_upload() {
 void handle_upload_post() {
   if (!isLoggedIn()) return;
 
+  navMenuIndex = 7;
   String reply = "";
 
   if (uploadResult == 1)
@@ -2449,7 +3176,7 @@ void handle_upload_post() {
   addHeader(true, reply);
   reply += F("Upload finished");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
   printWebString = "";
   printToWeb = false;
 }
@@ -2510,7 +3237,7 @@ void handleFileUpload() {
         // once we're safe, remove file and create empty one...
         SPIFFS.remove((char *)upload.filename.c_str());
         uploadFile = SPIFFS.open(upload.filename.c_str(), "w");
-        flashCount();
+        // dont count manual uploads: flashCount();
       }
     }
     if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
@@ -2540,6 +3267,8 @@ void handleFileUpload() {
 bool loadFromFS(boolean spiffs, String path) {
   if (!isLoggedIn()) return false;
 
+  statusLED(true);
+
   String dataType = F("text/plain");
   if (path.endsWith("/")) path += F("index.htm");
 
@@ -2553,6 +3282,10 @@ bool loadFromFS(boolean spiffs, String path) {
   else if (path.endsWith(".ico")) dataType = F("image/x-icon");
   else if (path.endsWith(".txt")) dataType = F("application/octet-stream");
   else if (path.endsWith(".dat")) dataType = F("application/octet-stream");
+  else if (path.endsWith(".esp")) return handle_custom(path);
+
+  String log = F("HTML : Request file ");
+  log += path;
 
   path = path.substring(1);
   if (spiffs)
@@ -2560,6 +3293,12 @@ bool loadFromFS(boolean spiffs, String path) {
     fs::File dataFile = SPIFFS.open(path.c_str(), "r");
     if (!dataFile)
       return false;
+
+    //prevent reloading stuff on every click
+    WebServer.sendHeader("Cache-Control","max-age=3600, public");
+    WebServer.sendHeader("Vary","*");
+    WebServer.sendHeader("ETag","\"2.0.0\"");
+
     if (path.endsWith(".dat"))
       WebServer.sendHeader("Content-Disposition", "attachment;");
     WebServer.streamFile(dataFile, dataType);
@@ -2575,6 +3314,142 @@ bool loadFromFS(boolean spiffs, String path) {
     WebServer.streamFile(dataFile, dataType);
     dataFile.close();
   }
+  statusLED(true);
+
+  addLog(LOG_LEVEL_DEBUG, log);
+  return true;
+}
+
+
+//********************************************************************************
+// Web Interface custom page handler
+//********************************************************************************
+boolean handle_custom(String path) {
+  path = path.substring(1);
+  String reply = "";
+
+  if (path.startsWith(F("dashboard"))) // for the dashboard page, create a default unit dropdown selector 
+  {
+    reply += F("<script><!--\n"
+             "function dept_onchange(frmselect) {frmselect.submit();}"
+             "\n//--></script>");
+
+    reply += F("<form name='frmselect' method='post'>");
+
+    // handle page redirects to other unit's as requested by the unit dropdown selector
+    byte unit = WebServer.arg(F("unit")).toInt();
+    byte btnunit = WebServer.arg(F("btnunit")).toInt();
+    if(!unit) unit = btnunit; // unit element prevails, if not used then set to btnunit
+    if (unit && unit != Settings.Unit)
+    {
+      char url[20];
+      sprintf_P(url, PSTR("http://%u.%u.%u.%u/dashboard.esp"), Nodes[unit].ip[0], Nodes[unit].ip[1], Nodes[unit].ip[2], Nodes[unit].ip[3]);
+      reply = F("<meta http-equiv=\"refresh\" content=\"0; URL=");
+      reply += url; 
+      reply += F("\">");
+      WebServer.send(200, F("text/html"), reply);
+      return true;
+    }
+
+    // create unit selector dropdown
+    addSelector_Head(reply, F("unit"), true);
+    byte choice = Settings.Unit;
+    for (byte x = 0; x < UNIT_MAX; x++)
+    {
+      if (Nodes[x].ip[0] != 0 || x == Settings.Unit)
+      {
+      String name = String(x) + F(" - ");
+      if (x != Settings.Unit)
+        name += Nodes[x].nodeName;
+      else
+        name += Settings.Name;
+
+      addSelector_Item(reply, name, x, choice == x, false, F(""));
+      }
+    } 
+    addSelector_Foot(reply);
+
+    // create <> navigation buttons
+    byte prev=Settings.Unit;
+    byte next=Settings.Unit;
+    for (byte x = Settings.Unit-1; x > 0; x--)
+      if (Nodes[x].ip[0] != 0) {prev = x; break;}
+    for (byte x = Settings.Unit+1; x < UNIT_MAX; x++)
+      if (Nodes[x].ip[0] != 0) {next = x; break;}
+      
+    reply += F("<a class='button link' href=");
+    reply += path;
+    reply += F("?btnunit=");
+    reply += prev;
+    reply += F(">&lt;</a>");
+    reply += F("<a class='button link' href=");
+    reply += path;
+    reply += F("?btnunit=");
+    reply += next;
+    reply += F(">&gt;</a>");
+  }
+
+  // handle commands from a custom page
+  String webrequest = WebServer.arg(F("cmd"));
+  if (webrequest.length() > 0){
+    struct EventStruct TempEvent;
+    parseCommandString(&TempEvent, webrequest);
+    TempEvent.Source = VALUE_SOURCE_HTTP;
+
+    if (PluginCall(PLUGIN_WRITE, &TempEvent, webrequest));
+    else if (remoteConfig(&TempEvent, webrequest));
+    else if (webrequest.startsWith(F("event")))
+      ExecuteCommand(VALUE_SOURCE_HTTP, webrequest.c_str());
+
+    // handle some update processes first, before returning page update...
+    PluginCall(PLUGIN_TEN_PER_SECOND, 0, dummyString);
+  }
+
+  // create a dynamic custom page, parsing task values into [<taskname>#<taskvalue>] placeholders and parsing %xx% system variables
+  fs::File dataFile = SPIFFS.open(path.c_str(), "r");
+  if (dataFile)
+  {
+    String page = "";
+    while (dataFile.available())
+      page += ((char)dataFile.read());
+
+    reply += parseTemplate(page,0);
+    dataFile.close();
+  }
+  else // if the requestef file does not exist, create a default action in case the page is named "dashboard*"
+  {
+    if (path.startsWith(F("dashboard")))
+    {
+      // if the custom page does not exist, create a basic task value overview page in case of dashboard request...
+      reply += F("<meta name=\"viewport\" content=\"width=width=device-width, initial-scale=1\"><STYLE>* {font-family:sans-serif; font-size:16pt;}.button {margin:4px; padding:4px 16px; background-color:#07D; color:#FFF; text-decoration:none; border-radius:4px}</STYLE>");
+      reply += F("<table>");
+      for (byte x = 0; x < TASKS_MAX; x++)
+      {
+        if (Settings.TaskDeviceNumber[x] != 0)
+          {
+            LoadTaskSettings(x);
+            byte DeviceIndex = getDeviceIndex(Settings.TaskDeviceNumber[x]);
+            reply += F("<TR><TD>");
+            reply += ExtraTaskSettings.TaskDeviceName;
+            for (byte varNr = 0; varNr < VARS_PER_TASK; varNr++)
+              {
+                if ((Settings.TaskDeviceNumber[x] != 0) && (varNr < Device[DeviceIndex].ValueCount) && ExtraTaskSettings.TaskDeviceValueNames[varNr][0] !=0)
+                {
+                  if (varNr > 0)
+                    reply += F("<TR><TD>");
+                  reply += F("<TD>");
+                  reply += ExtraTaskSettings.TaskDeviceValueNames[varNr];
+                  reply += F("<TD>");
+                  reply += String(UserVar[x * VARS_PER_TASK + varNr], ExtraTaskSettings.TaskDeviceValueDecimals[varNr]);
+                }
+              }
+          }
+      }
+    }
+    else
+      return false; // unknown file that does not exist...
+  }
+  WebServer.send(200, "text/html", reply);
   return true;
 }
 
@@ -2584,17 +3459,18 @@ bool loadFromFS(boolean spiffs, String path) {
 //********************************************************************************
 void handle_filelist() {
 
+  navMenuIndex = 7;
   String fdelete = WebServer.arg(F("delete"));
 
   if (fdelete.length() > 0)
   {
     SPIFFS.remove(fdelete);
-    flashCount();
+    // flashCount();
   }
 
   String reply = "";
   addHeader(true, reply);
-  reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH><TH>Filename:<TH>Size");
+  reply += F("<table border=1px frame='box' rules='all'><TH><TH>Filename:<TH>Size");
 
   fs::Dir dir = SPIFFS.openDir("");
   while (dir.next())
@@ -2602,7 +3478,7 @@ void handle_filelist() {
     reply += F("<TR><TD>");
     if (dir.fileName() != "config.dat" && dir.fileName() != "security.dat" && dir.fileName() != "notification.dat")
     {
-      reply += F("<a class=\"button-link\" href=\"filelist?delete=");
+      reply += F("<a class='button link' href=\"filelist?delete=");
       reply += dir.fileName();
       reply += F("\">Del</a>");
     }
@@ -2617,9 +3493,9 @@ void handle_filelist() {
     reply += f.size();
   }
   reply += F("</table></form>");
-  reply += F("<BR><a class=\"button-link\" href=\"/upload\">Upload</a>");
+  reply += F("<BR><a class='button link' href=\"/upload\">Upload</a>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -2628,6 +3504,7 @@ void handle_filelist() {
 //********************************************************************************
 void handle_SDfilelist() {
 
+  navMenuIndex = 7;
   String fdelete = WebServer.arg(F("delete"));
 
   if (fdelete.length() > 0)
@@ -2637,7 +3514,7 @@ void handle_SDfilelist() {
 
   String reply = "";
   addHeader(true, reply);
-  reply += F("<table cellpadding='4' border='1' frame='box' rules='all'><TH><TH>Filename:<TH>Size");
+  reply += F("<table border=1px frame='box' rules='all'><TH><TH>Filename:<TH>Size");
 
   File root = SD.open("/");
   root.rewindDirectory();
@@ -2649,7 +3526,7 @@ void handle_SDfilelist() {
       reply += F("<TR><TD>");
       if (entry.name() != "config.dat" && entry.name() != "security.dat")
       {
-        reply += F("<a class=\"button-link\" href=\"SDfilelist?delete=");
+        reply += F("<a class='button link' href=\"SDfilelist?delete=");
         reply += entry.name();
         reply += F("\">Del</a>");
       }
@@ -2667,9 +3544,9 @@ void handle_SDfilelist() {
   //entry.close();
   root.close();
   reply += F("</table></form>");
-  //reply += F("<BR><a class=\"button-link\" href=\"/upload\">Upload</a>");
+  //reply += F("<BR><a class='button link' href=\"/upload\">Upload</a>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -2715,16 +3592,18 @@ void handle_setup() {
     IPAddress ip = WiFi.localIP();
     char host[20];
     sprintf_P(host, PSTR("%u.%u.%u.%u"), ip[0], ip[1], ip[2], ip[3]);
-    reply += F("<BR>ESP is connected and using IP Address: ");
+    reply += F("<BR>ESP is connected and using IP Address: <BR><h1>");
     reply += host;
-    reply += F("<BR><BR>Connect your laptop / tablet / phone back to your main Wifi network and ");
-    reply += F("<a class=\"button-menu\" href='http://");
+    reply += F("</h1><BR><BR>Connect your laptop / tablet / phone<BR>back to your main Wifi network and<BR><BR>");
+    reply += F("<a class='button' href='http://");
     reply += host;
     reply += F("/config'>Proceed to main config</a>");
     addFooter(reply);
-    WebServer.send(200, "text/html", reply);
+    sendWebPage(F("TmplAP"), reply);
+
     wifiSetup = false;
-    WifiAPMode(false);
+    //WifiAPMode(false);  //this forces the iPhone to exit safari and this page was never displayed
+    timerAPoff = millis() + 60000L;  //switch the AP off in 1 minute
     return;
   }
 
@@ -2741,7 +3620,7 @@ void handle_setup() {
   }
 
   // if ssid config not set and params are both provided
-  if (status == 0 && ssid.length() != 0 && password.length() != 0 && strcasecmp(SecuritySettings.WifiSSID, "ssid") == 0)
+  if (status == 0 && ssid.length() != 0 && strcasecmp(SecuritySettings.WifiSSID, "ssid") == 0)
   {
     strncpy(SecuritySettings.WifiKey, password.c_str(), sizeof(SecuritySettings.WifiKey));
     strncpy(SecuritySettings.WifiSSID, ssid.c_str(), sizeof(SecuritySettings.WifiSSID));
@@ -2793,7 +3672,7 @@ void handle_setup() {
       status = 0;
       strncpy(SecuritySettings.WifiSSID, "ssid", sizeof(SecuritySettings.WifiSSID));
       SecuritySettings.WifiKey[0] = 0;
-      reply += F("<a class=\"button-menu\" href=\"setup\">Back to Setup</a>");
+      reply += F("<a class=\"button\" href=\"setup\">Back to Setup</a>");
     }
     else
     {
@@ -2824,7 +3703,7 @@ void handle_setup() {
 
   reply += F("</form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplAP"), reply);
   delay(10);
 }
 
@@ -2836,6 +3715,7 @@ void handle_rules() {
   if (!isLoggedIn()) return;
   static byte currentSet = 1;
 
+  navMenuIndex = 5;
   String set = WebServer.arg(F("set"));
   byte rulesSet = 1;
   if (set.length() > 0)
@@ -2848,7 +3728,8 @@ void handle_rules() {
   fileName += F(".txt");
 
   String reply = "";
-  checkRAM(8);
+  checkRAM(F("handle_rules"));
+
   addHeader(true, reply);
 
   if (WebServer.args() > 0)
@@ -2861,22 +3742,22 @@ void handle_rules() {
       else
       {
 
-        if (RTC.flashDayCounter > MAX_FLASHWRITES_PER_DAY)
-        {
-          String log = F("FS   : Daily flash write rate exceeded!");
-          addLog(LOG_LEVEL_ERROR, log);
-          reply += F("<span style=\"color:red\">Error saving to flash!</span>");
-        }
-        else
-        {
+        // if (RTC.flashDayCounter > MAX_FLASHWRITES_PER_DAY)
+        // {
+        //   String log = F("FS   : Daily flash write rate exceeded! (powercyle to reset this)");
+        //   addLog(LOG_LEVEL_ERROR, log);
+        //   reply += F("<span style=\"color:red\">Error saving to flash!</span>");
+        // }
+        // else
+        // {
           fs::File f = SPIFFS.open(fileName, "w");
           if (f)
           {
             f.print(rules);
             f.close();
-            flashCount();
+            // flashCount();
           }
-        }
+        // }
       }
     }
     else // changed set, check if file exists and create new
@@ -2892,7 +3773,7 @@ void handle_rules() {
   if (rulesSet != currentSet)
     currentSet = rulesSet;
 
-  reply += F("<form name = 'frmselect' method = 'post'><table><TH>Rules");
+  reply += F("<form name = 'frmselect' method = 'post'><table><TR><TH>Rules");
 
   byte choice = rulesSet;
   String options[RULESETS_MAX];
@@ -2903,46 +3784,47 @@ void handle_rules() {
     options[x] += x + 1;
     optionValues[x] = x + 1;
   }
-  reply += F("<TR><TD>Edit: <select name = 'set' LANGUAGE = javascript onchange = \"return dept_onchange(frmselect)\" >");
-  for (byte x = 0; x < RULESETS_MAX; x++)
-  {
-    reply += F("<option value='");
-    reply += optionValues[x];
-    reply += "'";
-    if (choice == optionValues[x])
-      reply += F(" selected");
-    reply += ">";
-    reply += options[x];
-    reply += F("</option>");
-  }
-  reply += F("</select>");
+
+  reply += F("<TR><TD>Edit: ");
+  addSelector(reply, F("set"), RULESETS_MAX, options, optionValues, NULL, choice, true);
+  addHelpButton(reply, F("Tutorial_Rules"));
 
   // load form data from flash
 
+  int size = 0;
   fs::File f = SPIFFS.open(fileName, "r+");
   if (f)
   {
-    if (f.size() > RULES_MAX_SIZE)
+    size = f.size();
+    if (size > RULES_MAX_SIZE)
       reply += F("<span style=\"color:red\">Filesize exceeds web editor limit!</span>");
     else
     {
       reply += F("<TR><TD><textarea name='rules' rows='15' cols='80' wrap='off'>");
       while (f.available())
-        reply += (char)f.read();
+      {
+        String c((char)f.read());
+        htmlEscape(c);
+        reply += c;
+      }
       reply += F("</textarea>");
     }
+    f.close();
   }
 
   reply += F("<TR><TD>Current size: ");
-  reply += f.size();
+  reply += size;
   reply += F(" characters (Max ");
   reply += RULES_MAX_SIZE;
   reply += F(")");
 
-  reply += F("<TR><TD><input class=\"button-link\" type='submit' value='Submit'>");
+  addFormSeparator(reply);
+
+  reply += F("<TR><TD>");
+  addSubmitButton(reply);
   reply += F("</table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -2961,7 +3843,7 @@ void handle_sysinfo() {
 
   reply += printWebString;
   reply += F("<form>");
-  reply += F("<table><TH>System Info<TH>");
+  reply += F("<table><TR><TH>System Info<TH>");
 
   reply += F("<TR><TD>Unit:<TD>");
   reply += Settings.Unit;
@@ -2970,21 +3852,7 @@ void handle_sysinfo() {
   {
 
     reply += F("<TR><TD>Local Time:<TD>");
-    reply += year();
-    reply += F("-");
-    if (month() < 10)
-      reply += "0";
-    reply += month();
-    reply += F("-");
-    if (day() < 10)
-    	reply += F("0");
-    reply += day();
-    reply += F(" ");
-    reply += hour();
-    reply += F(":");
-    if (minute() < 10)
-      reply += F("0");
-    reply += minute();
+    reply += getDateTimeString('-', ':', ' ');
   }
 
   reply += F("<TR><TD>Uptime:<TD>");
@@ -3010,6 +3878,8 @@ void handle_sysinfo() {
   reply += freeMem;
   reply += F(" (");
   reply += lowestRAM;
+  reply += F(" - ");
+  reply += lowestRAMfunction;
   reply += F(")");
 
   if (WiFi.status() == WL_CONNECTED)
@@ -3019,7 +3889,7 @@ void handle_sysinfo() {
     reply += F(" dB");
     reply += F("<TR><TD>Wifi Type:<TD>");
     byte PHYmode = wifi_get_phy_mode();
-    switch(PHYmode)
+    switch (PHYmode)
     {
       case 1:
         reply += F("802.11B");
@@ -3052,17 +3922,17 @@ void handle_sysinfo() {
 
   reply += F("<TR><TD>Plugin sets:<TD>");
 
-  #ifdef PLUGIN_BUILD_NORMAL
-    reply += F("[Normal] ");
-  #endif
+#ifdef PLUGIN_BUILD_NORMAL
+  reply += F("[Normal] ");
+#endif
 
-  #ifdef PLUGIN_BUILD_TESTING
-    reply += F("[Testing] ");
-  #endif
+#ifdef PLUGIN_BUILD_TESTING
+  reply += F("[Testing] ");
+#endif
 
-  #ifdef PLUGIN_BUILD_DEV
-    reply += F("[Development] ");
-  #endif
+#ifdef PLUGIN_BUILD_DEV
+  reply += F("[Development] ");
+#endif
 
   reply += F("<TR><TD>Core Version:<TD>");
   reply += ESP.getCoreVersion();
@@ -3102,6 +3972,9 @@ void handle_sysinfo() {
       break;
   }
 
+  reply += F("<TR><TD>Warm boot count:<TD>");
+  reply += RTC.bootCounter;
+
   reply += F("<TR><TD>STA MAC:<TD>");
   uint8_t mac[] = {0, 0, 0, 0, 0, 0};
   uint8_t* macread = WiFi.macAddress(mac);
@@ -3122,7 +3995,7 @@ void handle_sysinfo() {
 
   reply += F("</table></form>");
   addFooter(reply);
-  WebServer.send(200, "text/html", reply);
+  sendWebPage(F("TmplStd"), reply);
 }
 
 
@@ -3147,4 +4020,21 @@ String URLEncode(const char* msg)
     msg++;
   }
   return encodedMsg;
+}
+
+
+String getControllerSymbol(byte index)
+{
+  String ret = F("&#");
+  ret += 10102 + index;
+  ret += F(";");
+  return ret;
+}
+
+String getValueSymbol(byte index)
+{
+  String ret = F("&#");
+  ret += 10112 + index;
+  ret += F(";");
+  return ret;
 }

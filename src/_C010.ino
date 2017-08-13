@@ -48,9 +48,10 @@ boolean CPlugin_010(byte function, struct EventStruct *event, String& string)
             C010_Send(event, x, UserVar[event->BaseVarIndex + x], 0);
           if (valueCount > 1)
           {
-            unsigned long timer = millis() + Settings.MessageDelay;
-            while (millis() < timer)
-              backgroundtasks();
+            delayBackground(Settings.MessageDelay);
+            // unsigned long timer = millis() + Settings.MessageDelay;
+            // while (millis() < timer)
+            //   backgroundtasks();
           }
         }
         break;
@@ -74,7 +75,7 @@ boolean C010_Send(struct EventStruct *event, byte varIndex, float value, unsigne
   char host[20];
   sprintf_P(host, PSTR("%u.%u.%u.%u"), ControllerSettings.IP[0], ControllerSettings.IP[1], ControllerSettings.IP[2], ControllerSettings.IP[3]);
 
-  sprintf_P(log, PSTR("%s%s using port %u"), PSTR("UDP  : sending to "), host, ControllerSettings.Port);
+  sprintf_P(log, PSTR("%s%s using port %u"), "UDP  : sending to ", host, ControllerSettings.Port);
   addLog(LOG_LEVEL_DEBUG, log);
 
   statusLED(true);
